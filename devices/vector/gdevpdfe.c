@@ -825,6 +825,31 @@ pdf_write_document_metadata(gx_device_pdf *pdev, const byte digest[6])
                 }
                 pdf_xml_attribute_name(s, "pdfaid:conformance");
                 pdf_xml_attribute_value(s,"B");
+                
+                
+                // mth: for GEMATIK pdfa specifications we need the version as an element, not an attribute
+                pdf_xml_tag_end(s);
+                pdf_xml_tag_open_beg(s, "pdfaid:part");
+                pdf_xml_tag_end(s);
+                switch(pdev->PDFA) {
+                    case 1:
+                        pdf_xml_copy(s,"1");
+                        break;
+                    case 2:
+                        pdf_xml_copy(s,"2");
+                        break;
+                    case 3:
+                        pdf_xml_copy(s,"3");
+                        break;
+                }
+                pdf_xml_tag_close(s, "pdfaid:part");                
+                pdf_xml_tag_open_beg(s, "pdfaid:conformance");
+                pdf_xml_tag_end(s);
+                pdf_xml_copy(s,"B");
+                pdf_xml_tag_close(s, "pdfaid:conformance");
+                pdf_xml_tag_close(s, "rdf:Description");
+
+
                 pdf_xml_tag_end_empty(s);
            }
         }
