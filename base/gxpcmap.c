@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -40,6 +40,8 @@
 #include "gdevp14.h"
 #include "gxgetbit.h"
 #include "gscoord.h"
+#include "gsicc_blacktext.h"
+#include "gscspace.h"
 
 #if RAW_PATTERN_DUMP
 unsigned int global_pat_index = 0;
@@ -133,6 +135,7 @@ pattern_accum_initialize_device_procs(gx_device *dev)
     set_dev_proc(dev, strip_tile_rect_devn, gx_default_strip_tile_rect_devn);
     set_dev_proc(dev, transform_pixel_region, gx_default_transform_pixel_region);
     set_dev_proc(dev, fill_stroke_path, gx_default_fill_stroke_path);
+    set_dev_proc(dev, lock_pattern, gx_default_lock_pattern);
     set_dev_proc(dev, copy_alpha_hl_color, gx_default_copy_alpha_hl_color);
 }
 
@@ -225,7 +228,7 @@ gx_pattern_accum_alloc(gs_memory_t * mem, gs_memory_t * storage_memory,
     size_t max_pattern_bitmap = tdev->MaxPatternBitmap == 0 ? MaxPatternBitmap_DEFAULT :
                                 tdev->MaxPatternBitmap;
 
-    pinst->is_planar = tdev->is_planar;
+    pinst->num_planar_planes = tdev->num_planar_planes;
     /*
      * If the target device can accumulate a pattern stream and the language
      * client supports high level patterns (ps and pdf only) we don't need a
@@ -292,9 +295,10 @@ gx_pattern_accum_alloc(gs_memory_t * mem, gs_memory_t * storage_memory,
     }
     fdev->log2_align_mod = tdev->log2_align_mod;
     fdev->pad = tdev->pad;
-    fdev->is_planar = tdev->is_planar;
+    fdev->num_planar_planes = tdev->num_planar_planes;
     fdev->graphics_type_tag = tdev->graphics_type_tag;
     fdev->interpolate_control = tdev->interpolate_control;
+    fdev->non_strict_bounds = tdev->non_strict_bounds;
     gx_device_forward_fill_in_procs(fdev);
     return fdev;
 }
@@ -420,7 +424,8 @@ pattern_accum_open(gx_device * dev)
 #undef PDSET
                     bits->color_info = padev->color_info;
                     bits->bitmap_memory = mem;
-                    if (target->is_planar > 0)
+
+                    if (target->num_planar_planes > 0)
                     {
                         gx_render_plane_t planes[GX_DEVICE_COLOR_MAX_COMPONENTS];
                         uchar num_comp = padev->color_info.num_components;
@@ -676,7 +681,7 @@ blank_unmasked_bits(gx_device * mask,
             for (x = 0; x < w; x++)
             {
                 int xx = x+x0;
-                if (((mine[xx>>3]>>(x&7)) & 1) == 0) {
+                if (((mine[xx>>3]<<(x&7)) & 128) == 0) {
                     switch (depth)
                     {
                     case 8:
@@ -855,7 +860,7 @@ gx_pattern_alloc_cache(gs_memory_t * mem, uint num_tiles, ulong max_bits)
         tiles->index = i;
         tiles->cdev = NULL;
         tiles->ttrans = NULL;
-        tiles->is_planar = false;
+        tiles->num_planar_planes = 0;
     }
     return pcache;
 }
@@ -979,6 +984,41 @@ gx_pattern_cache_free_entry(gx_pattern_cache * pcache, gx_color_tile * ctile)
     }
 }
 
+/*
+    Historically, the pattern cache has used a very simple hashing
+    scheme whereby pattern A goes into slot idx = (A.id % num_tiles).
+    Unfortunately, now we allow tiles to be 'locked' into the
+    pattern cache, we might run into the case where we want both
+    tiles A and B to be in the cache at once where:
+      (A.id % num_tiles) == (B.id % num_tiles).
+
+    We have a maximum of 2 locked tiles, and one of those can be
+    placed while the other one is locked. So we only need to cope
+    with a single 'collision'.
+
+    We therefore allow tiles to either go in at idx or at
+    (idx + 1) % num_tiles. This means we need to be prepared to
+    search a bit further for them, hence we now have 2 helper
+    functions to do this.
+*/
+
+/* We can have at most 1 locked tile while looking for a place to
+ * put another tile. */
+gx_color_tile *
+gx_pattern_cache_find_tile_for_id(gx_pattern_cache *pcache, gs_id id)
+{
+    gx_color_tile *ctile  = &pcache->tiles[id % pcache->num_tiles];
+    gx_color_tile *ctile2 = &pcache->tiles[(id+1) % pcache->num_tiles];
+    if (ctile->id == id || ctile->id == gs_no_id)
+        return ctile;
+    if (ctile2->id == id || ctile2->id == gs_no_id)
+        return ctile2;
+    if (!ctile->is_locked)
+        return ctile;
+    return ctile2;
+}
+
+
 /* Given the size of a new pattern tile, free entries from the cache until  */
 /* enough space is available (or nothing left to free).                     */
 /* This will allow 1 oversized entry                                        */
@@ -1032,7 +1072,7 @@ gx_pattern_cache_add_entry(gs_gstate * pgs,
 {
     gx_pattern_cache *pcache;
     const gs_pattern1_instance_t *pinst;
-    ulong used = 0, mask_used = 0, trans_used = 0;
+    size_t used = 0, mask_used = 0, trans_used = 0;
     gx_bitmap_id id;
     gx_color_tile *ctile;
     int code = ensure_pattern_cache(pgs);
@@ -1123,10 +1163,10 @@ gx_pattern_cache_add_entry(gs_gstate * pgs,
         used = size_b + size_c;
     }
     id = pinst->id;
-    ctile = &pcache->tiles[id % pcache->num_tiles];
+    ctile = gx_pattern_cache_find_tile_for_id(pcache, id);
     gx_pattern_cache_free_entry(pcache, ctile);         /* ensure that this cache slot is empty */
     ctile->id = id;
-    ctile->is_planar = pinst->is_planar;
+    ctile->num_planar_planes = pinst->num_planar_planes;
     ctile->depth = fdev->color_info.depth;
     ctile->uid = pinst->templat.uid;
     ctile->tiling_type = pinst->templat.TilingType;
@@ -1193,15 +1233,13 @@ gx_pattern_cache_add_entry(gs_gstate * pgs,
 int
 gx_pattern_cache_entry_set_lock(gs_gstate *pgs, gs_id id, bool new_lock_value)
 {
-    gx_pattern_cache *pcache;
     gx_color_tile *ctile;
     int code = ensure_pattern_cache(pgs);
 
     if (code < 0)
         return code;
-    pcache = pgs->pattern_cache;
-    ctile = &pcache->tiles[id % pcache->num_tiles];
-    if (ctile->id != id)
+    ctile = gx_pattern_cache_find_tile_for_id(pgs->pattern_cache, id);
+    if (ctile == NULL)
         return_error(gs_error_undefined);
     ctile->is_locked = new_lock_value;
     return 0;
@@ -1218,7 +1256,7 @@ gx_pattern_cache_get_entry(gs_gstate * pgs, gs_id id, gx_color_tile ** pctile)
     if (code < 0)
         return code;
     pcache = pgs->pattern_cache;
-    ctile = &pcache->tiles[id % pcache->num_tiles];
+    ctile = gx_pattern_cache_find_tile_for_id(pcache, id);
     gx_pattern_cache_free_entry(pgs->pattern_cache, ctile);
     ctile->id = id;
     *pctile = ctile;
@@ -1245,7 +1283,7 @@ gx_pattern_cache_add_dummy_entry(gs_gstate *pgs,
     if (code < 0)
         return code;
     pcache = pgs->pattern_cache;
-    ctile = &pcache->tiles[id % pcache->num_tiles];
+    ctile = gx_pattern_cache_find_tile_for_id(pcache, id);
     gx_pattern_cache_free_entry(pcache, ctile);
     ctile->id = id;
     ctile->depth = depth;
@@ -1288,13 +1326,13 @@ dump_raw_pattern(int height, int width, int n_chan, int depth,
     byte *curr_ptr = Buffer;
     int plane_offset;
 
-    is_planar = mdev->is_planar;
+    is_planar = mdev->num_planar_planes > 0;
     max_bands = ( n_chan < 57 ? n_chan : 56);   /* Photoshop handles at most 56 bands */
     if (is_planar) {
-        gs_sprintf(full_file_name, "%d)PATTERN_PLANE_%dx%dx%d.raw", global_pat_index,
+        gs_snprintf(full_file_name, sizeof(full_file_name), "%d)PATTERN_PLANE_%dx%dx%d.raw", global_pat_index,
                 mdev->raster, height, max_bands);
     } else {
-        gs_sprintf(full_file_name, "%d)PATTERN_CHUNK_%dx%dx%d.raw", global_pat_index,
+        gs_snprintf(full_file_name, sizeof(full_file_name), "%d)PATTERN_CHUNK_%dx%dx%d.raw", global_pat_index,
                 width, height, max_bands);
     }
     fid = gp_fopen(memory,full_file_name,"wb");
@@ -1364,7 +1402,7 @@ make_bitmap(register gx_strip_bitmap * pbm, const gx_device_memory * mdev,
     pbm->rep_height = pbm->size.y = mdev->height;
     pbm->id = id;
     pbm->rep_shift = pbm->shift = 0;
-    pbm->num_planes = (mdev->is_planar ? mdev->color_info.num_components : 1);
+    pbm->num_planes = mdev->num_planar_planes ? mdev->num_planar_planes : 1;
 
         /* Lets dump this for debug purposes */
 
@@ -1490,9 +1528,9 @@ gx_pattern_load(gx_device_color * pdc, const gs_gstate * pgs,
     if (code < 0)
         goto fail;
     if (pinst->templat.uses_transparency) {
-        if_debug0m('v', mem, "gx_pattern_load: pushing the pdf14 compositor device into this graphics state\n");
-        if ((code = gs_push_pdf14trans_device(saved, true, false, 0, 0)) < 0)   /* FIXME: do we need spot_color_count ??? */
-            return code;
+        if_debug1m('v', mem, "gx_pattern_load: pushing the pdf14 compositor device into this graphics state pat_id = %ld\n", pinst->id);
+        if ((code = gs_push_pdf14trans_device(saved, true, false, 0, 0)) < 0)   /* spot_color_count taken from pdf14 target values */
+            goto fail;
         saved->device->is_open = true;
     } else {
         /* For colored patterns we clear the pattern device's
@@ -1550,7 +1588,7 @@ gx_pattern_load(gx_device_color * pdc, const gs_gstate * pgs,
                 /* Send the compositor command to close the PDF14 device */
                 code = gs_pop_pdf14trans_device(saved, true);
                 if (code < 0)
-                    return code;
+                    goto fail;
             } else {
                 /* Not a clist, get PDF14 buffer information */
                 code =
@@ -1561,7 +1599,7 @@ gx_pattern_load(gx_device_color * pdc, const gs_gstate * pgs,
                 /* PDF14 device (and buffer) is destroyed when pattern cache
                    entry is removed */
                 if (code < 0)
-                    return code;
+                    goto fail;
             }
     }
     /* We REALLY don't like the following cast.... */
@@ -1610,6 +1648,8 @@ fail:
         cdev->common.data = 0;
     }
     dev_proc(adev, close_device)((gx_device *)adev);
+    gx_device_set_target(adev, NULL);
+    rc_decrement(adev, "gx_pattern_load");
     gs_gstate_free_chain(saved);
     return code;
 }
@@ -1633,10 +1673,29 @@ gs_pattern1_remap_color(const gs_client_color * pc, const gs_color_space * pcs,
         return 0;
     }
     if (pinst->templat.PaintType == 2) {       /* uncolored */
-        if (pcs->base_space)
-            code = (pcs->base_space->type->remap_color)
-                (pc, pcs->base_space, pdc, pgs, dev, select);
-        else
+        if (pcs->base_space) {
+            if (dev->icc_struct != NULL && dev->icc_struct->blackvector) {
+                gs_client_color temppc;
+                gs_color_space *graycs = gs_cspace_new_DeviceGray(pgs->memory);
+
+                if (graycs == NULL) {
+                    code = (pcs->base_space->type->remap_color)
+                        (pc, pcs->base_space, pdc, pgs, dev, select);
+                } else {
+                    if (gsicc_is_white_blacktextvec((gs_gstate*) pgs,
+                        dev, (gs_color_space*) pcs, (gs_client_color*) pc))
+                        temppc.paint.values[0] = 1.0;
+                    else
+                        temppc.paint.values[0] = 0.0;
+                    code = (graycs->type->remap_color)
+                        (&temppc, graycs, pdc, pgs, dev, select);
+                    rc_decrement_cs(graycs, "gs_pattern1_remap_color");
+                }
+            } else {
+                code = (pcs->base_space->type->remap_color)
+                    (pc, pcs->base_space, pdc, pgs, dev, select);
+            }
+        } else
             code = gs_note_error(gs_error_unregistered);
         if (code < 0)
             return code;

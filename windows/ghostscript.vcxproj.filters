@@ -1661,6 +1661,9 @@
     <ClCompile Include="..\base\gp_upapr.c">
       <Filter>base</Filter>
     </ClCompile>
+    <ClCompile Include="..\base\gp_utf8.c">
+      <Filter>base</Filter>
+    </ClCompile>
     <ClCompile Include="..\base\gp_vms.c">
       <Filter>base</Filter>
     </ClCompile>
@@ -1680,9 +1683,6 @@
       <Filter>base</Filter>
     </ClCompile>
     <ClCompile Include="..\base\gp_wsync.c">
-      <Filter>base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\base\gp_wutf8.c">
       <Filter>base</Filter>
     </ClCompile>
     <ClCompile Include="..\base\gpmisc.c">
@@ -6599,6 +6599,9 @@
     <ClCompile Include="..\extract\src\astring.c">
       <Filter>extract</Filter>
     </ClCompile>
+    <ClCompile Include="..\extract\src\boxer.c">
+      <Filter>extract</Filter>
+    </ClCompile>
     <ClCompile Include="..\extract\src\buffer.c">
       <Filter>extract</Filter>
     </ClCompile>
@@ -6638,6 +6641,9 @@
     <ClCompile Include="..\extract\src\outf.c">
       <Filter>extract</Filter>
     </ClCompile>
+    <ClCompile Include="..\extract\src\rect.c">
+      <Filter>extract</Filter>
+    </ClCompile>
     <ClCompile Include="..\extract\src\sys.c">
       <Filter>extract</Filter>
     </ClCompile>
@@ -6652,6 +6658,9 @@
     </ClCompile>
     <ClCompile Include="..\extract\src\zip-test.c">
       <Filter>extract</Filter>
+    </ClCompile>
+    <ClCompile Include="..\base\gssprintf.c">
+      <Filter>base</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -6722,6 +6731,9 @@
       <Filter>base %28.h%29</Filter>
     </ClInclude>
     <ClInclude Include="..\base\gp_os2.h">
+      <Filter>base %28.h%29</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\gp_utf8.h">
       <Filter>base %28.h%29</Filter>
     </ClInclude>
     <ClInclude Include="..\base\gpcheck.h">
@@ -10028,6 +10040,9 @@
       <Filter>devices\vector</Filter>
     </ClInclude>
     <ClInclude Include="..\base\gsalloc.h">
+      <Filter>base %28.h%29</Filter>
+    </ClInclude>
+    <ClInclude Include="..\base\gssprintf.h">
       <Filter>base %28.h%29</Filter>
     </ClInclude>
   </ItemGroup>

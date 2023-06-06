@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -171,12 +171,12 @@ pdfmark_make_dest(char dstr[MAX_DEST_STRING], gx_device_pdf * pdev,
     else if (pdfmark_find_key("/Action", pairs, count, &action) &&
              pdf_key_eq(&action, "/GoToR")
         )
-        gs_sprintf(dstr, "[%d ", page - 1);
+        gs_snprintf(dstr, MAX_DEST_STRING, "[%d ", page - 1);
     else {
         code = update_max_page_reference(pdev, &page);
         if (code < 0)
             return code;
-        gs_sprintf(dstr, "[%ld 0 R ", pdf_page_id(pdev, page));
+        gs_snprintf(dstr, MAX_DEST_STRING, "[%ld 0 R ", pdf_page_id(pdev, page));
     }
     len = strlen(dstr);
     if (len + view_string.size > MAX_DEST_STRING)
@@ -555,10 +555,12 @@ pdfmark_put_ao_pairs(gx_device_pdf * pdev, cos_dict_t *pcd,
                     i += 4, j += 2;
                 } else
                     cstr[j++] = cstr[i++];
-            if (j != i)
+            if (j != i) {
                 pcv->contents.chars.data =
-                    gs_resize_string(pdev->pdf_memory, cstr, csize, j,
-                                     "pdfmark_put_ao_pairs");
+                gs_resize_string(pdev->pdf_memory, cstr, csize, j,
+                                 "pdfmark_put_ao_pairs");
+                pcv->contents.chars.size = j;
+            }
         } else if (pdf_key_eq(pair, "/Rect")) {
             gs_rect rect;
             char rstr[MAX_RECT_STRING];
@@ -912,7 +914,7 @@ pdfmark_put_ao_pairs(gx_device_pdf * pdev, cos_dict_t *pcd,
         char dstr[1 + (sizeof(long) * 8 / 3 + 1) + 25 + 1];
         long page_id = pdf_page_id(pdev, pdev->next_page + 1);
 
-        gs_sprintf(dstr, "[%ld 0 R /XYZ null null null]", page_id);
+        gs_snprintf(dstr, MAX_DEST_STRING, "[%ld 0 R /XYZ null null null]", page_id);
         cos_dict_put_c_key_string(pcd, "/Dest", (const unsigned char*) dstr,
                                   strlen(dstr));
     }
@@ -1769,7 +1771,7 @@ pdfmark_PS(gx_device_pdf * pdev, gs_param_string * pairs, uint count,
         if (level1_id != gs_no_id) {
             char r[MAX_DEST_STRING];
 
-            gs_sprintf(r, "%ld 0 R", level1_id);
+            gs_snprintf(r, sizeof(r), "%ld 0 R", level1_id);
             code = cos_dict_put_c_key_string(cos_stream_dict(pcs), "/Level1",
                                              (byte *)r, strlen(r));
             if (code < 0)

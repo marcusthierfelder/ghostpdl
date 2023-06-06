@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -237,7 +237,12 @@ const gx_device_pdf PDF_DEVICE_IDENT =
  0,                     /* OCR_char_code */
  0,                     /* OCR_glyph */
  NULL,                  /* ocr_glyphs */
- 0                   /* initial_pattern_state */
+ 0,                     /* initial_pattern_state */
+ false,                 /* OmitInfoDate */
+ false,                 /* OmitXMP */
+ false,                 /* OmitID */
+ false,                 /* ModifiesPageSize */
+ false                  /* ModifiesPageOrder */
 };
 
 #else

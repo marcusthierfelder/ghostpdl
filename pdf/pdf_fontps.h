@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* common code for Postscript-type font handling */
@@ -201,11 +201,14 @@ static inline int pdf_ps_stack_push(pdf_ps_ctx_t *s)
                 s->cur = s->stack + currsize - 1;
                 s->toplim = s->stack + newsize - PDF_PS_STACK_GROW_SIZE;
             }
+            else {
+                return_error(gs_error_VMerror);
+            }
         }
     }
     s->cur++;
     if (pdf_ps_obj_has_type(s->cur, PDF_PS_OBJ_STACK_TOP))
-        return_error(gs_error_stackoverflow);
+        return_error(gs_error_pdf_stackoverflow);
     if (pdf_ps_obj_has_type(s->cur, PDF_PS_OBJ_STACK_BOTTOM))
         return_error(gs_error_stackunderflow);
     return 0;
@@ -236,7 +239,7 @@ static inline int pdf_ps_stack_pop(pdf_ps_ctx_t *s, unsigned int n)
         pdf_ps_make_null(s->cur);
         s->cur--;
         if (pdf_ps_obj_has_type(s->cur, PDF_PS_OBJ_STACK_TOP))
-            return_error(gs_error_stackoverflow);
+            return_error(gs_error_pdf_stackoverflow);
         if (pdf_ps_obj_has_type(s->cur, PDF_PS_OBJ_STACK_BOTTOM))
             return_error(gs_error_stackunderflow);
     }

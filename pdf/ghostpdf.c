@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Top level PDF access routines */
@@ -24,6 +24,7 @@
 #include "pdf_file.h"
 #include "pdf_loop_detect.h"
 #include "pdf_trans.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "stream.h"
 #include "strmio.h"
@@ -78,10 +79,15 @@ static int pdfi_output_metadata(pdf_context *ctx)
 {
     int code = 0;
 
-    if (ctx->num_pages > 1)
-        dmprintf2(ctx->memory, "\n        %s has %"PRIi64" pages\n\n", ctx->filename, ctx->num_pages);
+    if (ctx->filename != NULL)
+        dmprintf2(ctx->memory, "\n        %s has %"PRIi64" ", ctx->filename, ctx->num_pages);
     else
-        dmprintf2(ctx->memory, "\n        %s has %"PRIi64" page.\n\n", ctx->filename, ctx->num_pages);
+        dmprintf1(ctx->memory, "\n        File has %"PRIi64" ", ctx->num_pages);
+
+    if (ctx->num_pages > 1)
+        dmprintf(ctx->memory, "pages\n\n");
+    else
+        dmprintf(ctx->memory, "page.\n\n");
 
     if (ctx->Info != NULL) {
         pdf_name *n = NULL;
@@ -150,6 +156,7 @@ static int pdfi_output_metadata(pdf_context *ctx)
         pdfi_countdown(n);
         n = NULL;
     }
+    dmprintf(ctx->memory, "\n");
     return code;
 }
 
@@ -176,7 +183,7 @@ static int pdfi_dump_box(pdf_context *ctx, pdf_dict *page_dict, const char *Key)
                 if (i != 0)
                     dmprintf(ctx->memory, " ");
                 if (code == 0) {
-                    if (a->values[i]->type == PDF_INT)
+                    if (pdfi_type_of(a->values[i]) == PDF_INT)
                         dmprintf1(ctx->memory, "%"PRIi64"", ((pdf_num *)a->values[i])->value.i);
                     else
                         dmprintf1(ctx->memory, "%f", ((pdf_num *)a->values[i])->value.d);
@@ -191,6 +198,90 @@ static int pdfi_dump_box(pdf_context *ctx, pdf_dict *page_dict, const char *Key)
     return code;
 }
 
+static int dump_font(pdf_context *ctx, pdf_dict *font_dict, bool space_name)
+{
+    pdf_obj *obj = NULL;
+    char *str = NULL;
+    int len = 0, code = 0, i;
+    bool known = false, type0 = false;
+
+    code = pdfi_dict_get_type(ctx, font_dict, "BaseFont", PDF_NAME, &obj);
+    if (code >= 0) {
+        code = pdfi_string_from_name(ctx, (pdf_name *)obj, &str, &len);
+        if (code >= 0) {
+            dmprintf1(ctx->memory, "%s", str);
+            if (len < 32 && space_name) {
+                for (i = 0; i < 32 - len;i++)
+                    dmprintf(ctx->memory, " ");
+            } else
+                dmprintf(ctx->memory, "    ");
+            (void)pdfi_free_string_from_name(ctx, str);
+        }
+        pdfi_countdown(obj);
+        obj = NULL;
+    }
+
+    code = pdfi_dict_get_type(ctx, font_dict, "Subtype", PDF_NAME, &obj);
+    if (code >= 0) {
+        code = pdfi_string_from_name(ctx, (pdf_name *)obj, &str, &len);
+        if (code >= 0) {
+            dmprintf1(ctx->memory, "%s", str);
+            for (i = 0; i < 16 - len;i++)
+                dmprintf(ctx->memory, " ");
+            (void)pdfi_free_string_from_name(ctx, str);
+        }
+        if (pdfi_name_is((pdf_name *)obj, "Type0"))
+            type0 = true;
+        pdfi_countdown(obj);
+        obj = NULL;
+    }
+
+    if (!type0) {
+        code = pdfi_dict_get_type(ctx, font_dict, "Embedded", PDF_BOOL, &obj);
+        if (code >= 0) {
+            if (obj == PDF_FALSE_OBJ)
+                dmprintf(ctx->memory, "Not embedded    ");
+            else
+                dmprintf(ctx->memory, "Embedded        ");
+            pdfi_countdown(obj);
+            obj = NULL;
+        }
+        else
+            dmprintf(ctx->memory, "Not embedded    ");
+    } else
+        dmprintf(ctx->memory, "                ");
+
+    code = pdfi_dict_get_type(ctx, font_dict, "ToUnicode", PDF_BOOL, &obj);
+    if (code >= 0) {
+        if (obj == PDF_TRUE_OBJ)
+            dmprintf(ctx->memory, "Has ToUnicode    ");
+        else
+            dmprintf(ctx->memory, "No ToUnicode     ");
+        pdfi_countdown(obj);
+        obj = NULL;
+    }
+    else
+        dmprintf(ctx->memory, "No ToUnicode    ");
+
+    code = pdfi_dict_known(ctx, font_dict, "Descendants", &known);
+    if (code >= 0 && known) {
+        code = pdfi_dict_get_type(ctx, font_dict, "Descendants", PDF_ARRAY, &obj);
+        if (code >= 0) {
+            pdf_obj *desc = NULL;
+
+            code = pdfi_array_get_type(ctx, (pdf_array *)obj, 0, PDF_DICT, &desc);
+            if (code >= 0) {
+                dmprintf(ctx->memory, "\n            Descendants: [");
+                (void)dump_font(ctx, (pdf_dict *)desc, false);
+                dmprintf(ctx->memory, "]");
+            }
+            pdfi_countdown(obj);
+            obj = NULL;
+        }
+    }
+    return 0;
+}
+
 /*
  * This routine along with pdfi_output_metadtaa above, dumps certain kinds
  * of metadata from the PDF file, and from each page in the PDF file. It is
@@ -201,12 +292,13 @@ static int pdfi_dump_box(pdf_context *ctx, pdf_dict *page_dict, const char *Key)
  * we always emit them, and the switches -dDumpFontsNeeded, -dDumpXML,
  * -dDumpFontsUsed and -dShowEmbeddedFonts are not implemented at all yet.
  */
-static int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num)
+int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num)
 {
     int code;
     bool known = false;
     double f;
     pdf_dict *page_dict = NULL;
+    pdf_array *fonts_array = NULL, *spots_array = NULL;
 
     code = pdfi_page_get_dict(ctx, page_num, &page_dict);
     if (code < 0)
@@ -270,7 +362,7 @@ static int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num)
         return code;
     }
 
-    code = pdfi_check_page(ctx, page_dict, false);
+    code = pdfi_check_page(ctx, page_dict, &fonts_array, &spots_array, false);
     if (code < 0) {
         if (ctx->args.pdfstoponerror)
             return code;
@@ -282,16 +374,62 @@ static int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num)
     code = pdfi_dict_known(ctx, page_dict, "Annots", &known);
     if (code < 0) {
         if (code != gs_error_undefined && ctx->args.pdfstoponerror)
-            return code;
+            goto error;
     } else {
         if (known == true)
             dmprintf(ctx->memory, "     Page contains Annotations");
+        code = 0;
     }
 
+    if (spots_array != NULL) {
+        uint64_t index = 0;
+        pdf_name *spot = NULL;
+        char *str = NULL;
+        int len;
+
+        dmprintf(ctx->memory, "\n    Page Spot colors: \n");
+        for (index = 0;index < pdfi_array_size(spots_array);index++) {
+            code = pdfi_array_get(ctx, spots_array, index, (pdf_obj **)&spot);
+            if (code >= 0) {
+                if (pdfi_type_of(spot) == PDF_NAME) {
+                    code = pdfi_string_from_name(ctx, spot, &str, &len);
+                    if (code >= 0) {
+                        dmprintf1(ctx->memory, "        '%s'\n", str);
+                        (void)pdfi_free_string_from_name(ctx, str);
+                    }
+                }
+                pdfi_countdown(spot);
+                spot = NULL;
+            }
+        }
+        code = 0;
+    }
+
+    if (fonts_array != NULL && pdfi_array_size(fonts_array) != 0) {
+        uint64_t index = 0;
+        pdf_dict *font_dict = NULL;
+
+        dmprintf(ctx->memory, "\n    Fonts used: \n");
+        for (index = 0;index < pdfi_array_size(fonts_array);index++) {
+            code = pdfi_array_get_type(ctx, fonts_array, index, PDF_DICT, (pdf_obj **)&font_dict);
+            if (code >= 0) {
+                dmprintf(ctx->memory, "        ");
+                (void)dump_font(ctx, font_dict, true);
+                dmprintf(ctx->memory, "\n");
+                pdfi_countdown(font_dict);
+                font_dict = NULL;
+            }
+        }
+        code = 0;
+    }
+
+error:
+    pdfi_countdown(fonts_array);
+    pdfi_countdown(spots_array);
     dmprintf(ctx->memory, "\n\n");
     pdfi_countdown(page_dict);
 
-    return 0;
+    return code;
 }
 
 /* Error and warning string tables. There should be a string for each error and warning
@@ -303,84 +441,15 @@ static int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num)
  * 'unknown' message.
  */
 const char *pdf_error_strings[] = {
-    "no error",
-    "no header detected",
-    "header lacks a version number",
-    "no startxref token found",
-    "startxref offset invalid",
-    "couldn't read hybrid file's XrefStm",
-    "error in xref table",
-    "too few entries in xref table",
-    "content stream lacks endstream",
-    "request for unknown filter",
-    "missing white space after number",
-    "malformed number",
-    "unbalanced or unescaped character '(' in string",
-    "invalid object number",
-    "object lacks an endobj",
-    "error executing PDF token",
-    "potential token is too long",
-    "Page object doe snot have /Page type",
-    "circular reference to indirect object",
-    "couldn't repair PDF file",
-    "PDF file was repaired",
-    "error reading a stream",
-    "obj token missing",
-    "error in Page dictionary",
-    "out of memory",
-    "error reading page dictionary",
-    "stack underflow",
-    "error in stream dictionary",
-    "stream inherited a resource",
-    "counting down reference to freed object",
-    "error in transparency XObject",
-    "object lacks a required Subtype",
-    "error in image colour",
-    "dictionary contains a key which (indirectly) references the dictionary.",
-    ""                                          /* last error, should not be used */
+#define PARAM(A,B) B
+#include "pdf_errors.h"
+    ""                               /* last error, should not be used */
 };
 
 const char *pdf_warning_strings[] = {
-    "no warning",
-    "incorrect xref size",
-    "used inline filter name inappropriately",
-    "used inline colour space inappropriately",
-    "used inline image key inappropriately",
-    "recoverable image error",
-    "recoverable error in image dictionary",
-    "encountered more Q than q",
-    "encountered more q than Q",
-    "garbage left on stack",
-    "stack underflow",
-    "error in group definition",
-    "invalid operator used in text block",
-    "used invalid operator in CharProc",
-    "BT found inside a text block",
-    "ET found outside text block",
-    "text operator outside text block",
-    "degenerate text matrix",
-    "bad ICC colour profile, using alternate",
-    "bad ICC vs number components, using components",
-    "bad value for text rendering mode",
-    "error in shading",
-    "error in pattern",
-    "non standard operator found - ignoring",
-    "number uses illegal exponent form",
-    "Stream has inappropriate /Contents entry",
-    "bad DecodeParms",
-    "error in Mask",
-    "error in annotation Appearance",
-    "badly escaped name",
-    "typecheck error",
-    "bad trailer dictionary",
-    "error in annotation",
-    "failed to create ICC profile link",
-    "overflowed a real reading a number, assuming 0",
-    "failed to read a valid number, assuming 0",
-    "A DeviceN space used the /All ink name.",
-    "Couldn't retrieve MediaBox for page, using current media size",
-    "CA or ca value not in range 0.0 to 1.0, clamped to range.",
-    ""                                                  /* Last warning shuld not be used */
+#define PARAM(A,B) B
+#include "pdf_warnings.h"
+    ""                               /* Last warning should not be used */
 };
 
 const char *gs_error_strings[] = {
@@ -415,6 +484,8 @@ const char *gs_error_strings[] = {
     "unregistered",
     "invalidcontext",
     "invalidid",
+    "pdf_stackoverflow",
+    "circular reference"
 };
 
 const char *gs_internal_error_strings[] = {
@@ -426,16 +497,15 @@ const char *gs_internal_error_strings[] = {
     "exec stack underflow",
     "VMreclaim",
     "Need input",
+    "need file",
     "No defined error",
     "No defined error (2)",
-    "need file",
     "error info",
     "handled",
-    "circular reference"
 };
-#define LASTNORMALGSERROR gs_error_invalidid * -1
+#define LASTNORMALGSERROR gs_error_circular_reference * -1
 #define FIRSTINTERNALERROR gs_error_hit_detected * -1
-#define LASTGSERROR gs_error_circular_reference * -1
+#define LASTGSERROR gs_error_handled * -1
 
 void pdfi_verbose_error(pdf_context *ctx, int gs_error, const char *gs_lib_function, int pdfi_error, const char *pdfi_function_name, const char *extra_info)
 {
@@ -523,6 +593,37 @@ void pdfi_verbose_warning(pdf_context *ctx, int gs_error, const char *gs_lib_fun
     }
 }
 
+void pdfi_set_error_var(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_error pdfi_error, const char *pdfi_function_name, const char *fmt, ...)
+{
+    if (pdfi_error != 0)
+        ctx->pdf_errors[pdfi_error / (sizeof(char) * 8)] |= 1 << pdfi_error % (sizeof(char) * 8);
+    if (ctx->args.verbose_errors) {
+        char extra_info[gp_file_name_sizeof];
+        va_list args;
+
+        va_start(args, fmt);
+        (void)vsnprintf(extra_info, sizeof(extra_info), fmt, args);
+        va_end(args);
+
+        pdfi_verbose_error(ctx, gs_error, gs_lib_function, pdfi_error, pdfi_function_name, extra_info);
+    }
+}
+
+void pdfi_set_warning_var(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_warning pdfi_warning, const char *pdfi_function_name, const char *fmt, ...)
+{
+    ctx->pdf_warnings[pdfi_warning / (sizeof(char) * 8)] |= 1 << pdfi_warning % (sizeof(char) * 8);
+    if (ctx->args.verbose_warnings) {
+        char extra_info[gp_file_name_sizeof];
+        va_list args;
+
+        va_start(args, fmt);
+        (void)vsnprintf(extra_info, sizeof(extra_info), fmt, args);
+        va_end(args);
+
+        pdfi_verbose_warning(ctx, gs_error, gs_lib_function, pdfi_warning, pdfi_function_name, extra_info);
+    }
+}
+
 void pdfi_log_info(pdf_context *ctx, const char *pdfi_function, const char *info)
 {
 #ifdef DEBUG
@@ -594,10 +695,14 @@ pdfi_report_errors(pdf_context *ctx)
             char *cs;
 
             cs = (char *)gs_alloc_bytes(ctx->memory, s->length + 1, "temporary string for error report");
-            memcpy(cs, s->data, s->length);
-            cs[s->length] = 0x00;
-            dmprintf1(ctx->memory, "   **** The file was produced by: \n   **** >>>> %s <<<<\n", cs);
-            gs_free_object(ctx->memory, cs, "temporary string for error report");
+            if (cs == NULL) {
+                dmprintf(ctx->memory, "   **** Out of memory while trying to display Producer ****\n");
+            } else {
+                memcpy(cs, s->data, s->length);
+                cs[s->length] = 0x00;
+                dmprintf1(ctx->memory, "   **** The file was produced by: \n   **** >>>> %s <<<<\n", cs);
+                gs_free_object(ctx->memory, cs, "temporary string for error report");
+            }
         }
         pdfi_countdown(s);
     }
@@ -821,7 +926,7 @@ int pdfi_prep_collection(pdf_context *ctx, uint64_t *TotalFiles, char ***names_a
                     if (code < 0)
                         goto exit;
 
-                    if (File->type == PDF_DICT) {
+                    if (pdfi_type_of(File) == PDF_DICT) {
                         if (pdfi_dict_knownget_type(ctx, (pdf_dict *)File, "EF", PDF_DICT, &EF)) {
                             if (pdfi_dict_knownget_type(ctx, (pdf_dict *)EF, "F", PDF_STREAM, &F)) {
                                 pdf_dict *stream_dict = NULL;
@@ -896,7 +1001,7 @@ int pdfi_prep_collection(pdf_context *ctx, uint64_t *TotalFiles, char ***names_a
                                                     /* Create an entry for the Description in the names array */
                                                     code = pdfi_array_get(ctx, FileNames, ix * 2, (pdf_obj **)&Name);
                                                     if (code >= 0) {
-                                                        if (Name->type == PDF_STRING) {
+                                                        if (pdfi_type_of((pdf_obj *)Name) == PDF_STRING) {
                                                             working_array[(index * 2) + 1] = (char *)gs_alloc_bytes(ctx->memory, Name->length + 3, "Collection file names array entry");
                                                             if (working_array[(index * 2) + 1] != NULL) {
                                                                 memset(working_array[(index * 2) + 1], 0x00, Name->length + 3);
@@ -1023,11 +1128,6 @@ int pdfi_process_pdf_file(pdf_context *ctx, char *filename)
         return code;
     }
 
-    /* Need to do this here so that ctx->writepdfmarks will be setup
-     * It is also called in pdfi_page_render()
-     * TODO: Should probably look into that..
-     */
-    pdfi_device_set_flags(ctx);
     /* Do any custom device configuration */
     pdfi_device_misc_config(ctx);
 
@@ -1035,6 +1135,13 @@ int pdfi_process_pdf_file(pdf_context *ctx, char *filename)
         code = pdfi_process_collection(ctx);
     else
         code = pdfi_process(ctx);
+
+    /* Pdfmark_InitialPage is the offset for Page Dests in
+     * /Outlines and Link annotations. It is the count of pages
+     * processed so far. Update it by the number of pages in
+     * this file.
+     */
+    ctx->Pdfmark_InitialPage += ctx->num_pages;
 
     pdfi_close_pdf_file(ctx);
     return code;
@@ -1074,9 +1181,14 @@ static int pdfi_init_file(pdf_context *ctx)
         if (code < 0 && code != gs_error_undefined)
             goto exit;
         if (code == 0) {
-            code = pdfi_initialise_Decryption(ctx);
-            if (code < 0)
-                goto exit;
+            if (pdfi_type_of(o) == PDF_DICT) {
+                code = pdfi_initialise_Decryption(ctx);
+                if (code < 0)
+                    goto exit;
+            } else {
+                if (pdfi_type_of(o) != PDF_NULL)
+                    pdfi_set_error(ctx, code, NULL, E_PDF_BADENCRYPT, "pdfi_init_file", NULL);
+            }
         }
     }
 
@@ -1134,6 +1246,8 @@ read_root:
     if (ctx->num_pages == 0)
         dmprintf(ctx->memory, "\n   **** Warning: PDF document has no pages.\n");
 
+    pdfi_device_set_flags(ctx);
+
     code = pdfi_doc_trailer(ctx);
     if (code < 0)
         goto exit;
@@ -1156,10 +1270,10 @@ exit:
 int pdfi_set_input_stream(pdf_context *ctx, stream *stm)
 {
     byte *Buffer = NULL;
-    char *s = NULL;
+    char *s = NULL, *test = NULL;
     float version = 0.0;
     gs_offset_t Offset = 0;
-    int64_t bytes = 0, leftover = 0;
+    int64_t bytes = 0, leftover = 0, bytes_left = 0;
     bool found = false;
     int code;
 
@@ -1181,6 +1295,7 @@ int pdfi_set_input_stream(pdf_context *ctx, stream *stm)
     }
 
     /* Determine file size */
+    pdfi_seek(ctx, ctx->main_stream, 0, SEEK_SET);
     pdfi_seek(ctx, ctx->main_stream, 0, SEEK_END);
     ctx->main_stream_length = pdfi_tell(ctx->main_stream);
     Offset = BUF_SIZE;
@@ -1206,14 +1321,29 @@ int pdfi_set_input_stream(pdf_context *ctx, stream *stm)
     Buffer[Offset] = 0x00;
 
     /* First check for existence of header */
-    s = strstr((char *)Buffer, "%PDF");
+    test = (char *)Buffer;
+    bytes_left = bytes;
+    s = strstr((char *)test, "%PDF-");
+    if (s == NULL)
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_GARBAGE_B4HDR, "pdfi_set_input_stream", "");
+    /* Garbage before the header can be anything, including binary and NULL (0x00) characters
+     * which can defeat using strstr, so if we fail to find a header, try moving on by the length
+     * of the C string + 1 and try again.
+     */
+    while (s == NULL) {
+        bytes_left -= (strlen(test) + 1);
+        if (bytes_left < 5)
+            break;
+        test += strlen(test) + 1;
+        s = strstr((char *)test, "%PDF-");
+    };
     if (s == NULL) {
         char extra_info[gp_file_name_sizeof];
 
         if (ctx->filename)
-            gs_sprintf(extra_info, "%% File %s does not appear to be a PDF file (no %%PDF in first 2Kb of file)\n", ctx->filename);
+            gs_snprintf(extra_info, sizeof(extra_info), "%% File %s does not appear to be a PDF file (no %%PDF in first 2Kb of file)\n", ctx->filename);
         else
-            gs_sprintf(extra_info, "%% File does not appear to be a PDF stream (no %%PDF in first 2Kb of stream)\n");
+            gs_snprintf(extra_info, sizeof(extra_info), "%% File does not appear to be a PDF stream (no %%PDF in first 2Kb of stream)\n");
 
         pdfi_set_error(ctx, 0, NULL, E_PDF_NOHEADER, "pdfi_set_input_stream", extra_info);
     } else {
@@ -1224,6 +1354,18 @@ int pdfi_set_input_stream(pdf_context *ctx, stream *stm)
         }
         else {
             ctx->HeaderVersion = version;
+            s += 5;
+            while (((*s >= '0' && *s <= '9') || *s == '.') && *s != 0x00)
+                s++;
+            while (*s != 0x00) {
+                if (*s == 0x09 || *s== 0x0c || *s == 0x20) {
+                    s++;
+                    continue;
+                }
+                if (*s != 0x0A && *s != 0x0D)
+                    pdfi_set_warning(ctx, 0, NULL, W_PDF_VERSION_NO_EOL, "pdfi_set_input_stream", (char *)"%% PDF version not immediately followed with EOL\n");
+                break;
+            }
         }
         if (ctx->args.pdfdebug)
             dmprintf1(ctx->memory, "%% Found header, PDF version is %f\n", ctx->HeaderVersion);
@@ -1305,8 +1447,15 @@ int pdfi_set_input_stream(pdf_context *ctx, stream *stm)
              */
             if (last_lineend) {
                 leftover = last_lineend - Buffer;
-                memmove(Buffer + bytes - leftover, last_lineend, leftover);
-                bytes -= leftover;
+                /* Ensure we don't try to copy more than half a buffer, because that will
+                 * end up overrunning the buffer end. Since we are only doing this to
+                 * ensure we don't drop a partial 'startxref' that's far more than enough.
+                 */
+                if (leftover < BUF_SIZE / 2) {
+                    memmove(Buffer + bytes - leftover, last_lineend, leftover);
+                    bytes -= leftover;
+                } else
+                    leftover = 0;
             } else
                 leftover = 0;
         }
@@ -1644,7 +1793,14 @@ pdf_context *pdfi_create_context(gs_memory_t *mem)
     }
 
     ctx->pgs = pgs;
-    pdfi_gstate_set_client(ctx, pgs);
+    code = pdfi_gstate_set_client(ctx, pgs);
+    if (code < 0) {
+        gs_free_object(ctx->memory, ctx->font_dir, "pdf_create_context");
+        gs_free_object(pmem, ctx->stack_bot, "pdf_create_context");
+        gs_free_object(pmem, ctx, "pdf_create_context");
+        gs_gstate_free(pgs);
+        return NULL;
+    }
 
     /* Some (but not all) path construction operations can either return
      * an error or clamp values when out of range. In order to match Ghostscript's
@@ -1664,8 +1820,10 @@ pdf_context *pdfi_create_context(gs_memory_t *mem)
     /* Setup some flags that don't default to 'false' */
     ctx->args.showannots = true;
     ctx->args.preserveannots = true;
+    ctx->args.preserveembeddedfiles = true;
+    ctx->args.preservedocview = true;
     /* NOTE: For testing certain annotations on cluster, might want to set this to false */
-    ctx->args.printed = true; /* TODO: Should be true if OutputFile is set, false otherwise */
+    ctx->args.printed = false; /* True if OutputFile is set, false otherwise see pdftop.c, pdf_impl_set_param() */
 
     /* Initially, prefer the XrefStm in a hybrid file */
     ctx->prefer_xrefstm = true;
@@ -1681,6 +1839,13 @@ pdf_context *pdfi_create_context(gs_memory_t *mem)
      * grestore back to the initial state, it immediately saves another one.
      */
     code = gs_gsave(ctx->pgs);
+    if (code < 0) {
+        gs_free_object(ctx->memory, ctx->font_dir, "pdf_create_context");
+        gs_free_object(pmem, ctx->stack_bot, "pdf_create_context");
+        gs_gstate_free(ctx->pgs);
+        gs_free_object(pmem, ctx, "pdf_create_context");
+        return NULL;
+    }
 #if REFCNT_DEBUG
     ctx->UID = 1;
 #endif
@@ -1780,6 +1945,15 @@ int pdfi_clear_context(pdf_context *ctx)
     dmprintf1(ctx->memory, "Normal object cache hit rate: %f\n", hit_rate);
     dmprintf1(ctx->memory, "Compressed object cache hit rate: %f\n", compressed_hit_rate);
 #endif
+    if (ctx->PathSegments != NULL) {
+        gs_free_object(ctx->memory, ctx->PathSegments, "pdfi_clear_context");
+        ctx->PathSegments = NULL;
+    }
+    if (ctx->PathPts != NULL) {
+        gs_free_object(ctx->memory, ctx->PathPts, "pdfi_clear_context");
+        ctx->PathPts = NULL;
+    }
+
     if (ctx->args.PageList) {
         gs_free_object(ctx->memory, ctx->args.PageList, "pdfi_clear_context");
         ctx->args.PageList = NULL;
@@ -1809,14 +1983,19 @@ int pdfi_clear_context(pdf_context *ctx)
         ctx->PagesTree = NULL;
     }
 
-    if (ctx->args.cidsubstpath.data != NULL) {
-        gs_free_object(ctx->memory, ctx->args.cidsubstpath.data, "cidsubstpath.data");
-        ctx->args.cidsubstpath.data = NULL;
+    if (ctx->args.cidfsubstpath.data != NULL) {
+        gs_free_object(ctx->memory, ctx->args.cidfsubstpath.data, "cidfsubstpath.data");
+        ctx->args.cidfsubstpath.data = NULL;
     }
 
-    if (ctx->args.cidsubstfont.data != NULL) {
-        gs_free_object(ctx->memory, ctx->args.cidsubstfont.data, "cidsubstpath.data");
-        ctx->args.cidsubstfont.data = NULL;
+    if (ctx->args.cidfsubstfont.data != NULL) {
+        gs_free_object(ctx->memory, ctx->args.cidfsubstfont.data, "cidfsubstfont.data");
+        ctx->args.cidfsubstfont.data = NULL;
+    }
+
+    if (ctx->args.defaultfont.data != NULL) {
+        gs_free_object(ctx->memory, ctx->args.defaultfont.data, "cidfsubstfont.data");
+        ctx->args.defaultfont.data = NULL;
     }
 
     pdfi_free_cstring_array(ctx, &ctx->args.showannottypes);
@@ -1946,6 +2125,8 @@ int pdfi_clear_context(pdf_context *ctx)
     ctx->pdffontmap = NULL;
     pdfi_countdown(ctx->pdfnativefontmap);
     ctx->pdfnativefontmap = NULL;
+    pdfi_countdown(ctx->pdf_substitute_fonts);
+    ctx->pdf_substitute_fonts = NULL;
 
     return 0;
 }
@@ -1992,6 +2173,8 @@ int pdfi_free_context(pdf_context *ctx)
         pdfi_countdown(ctx->pdffontmap);
         ctx->pdffontmap = NULL;
     }
+    rc_decrement(ctx->devbbox, "pdfi_free_context");
+
     gs_free_object(ctx->memory, ctx, "pdfi_free_context");
 #if PDFI_LEAK_CHECK
     gs_memory_status(mem, &mstat);
@@ -2021,28 +2204,31 @@ int pdfi_free_context(pdf_context *ctx)
  * complications with the ICC profile cache.
  */
 
-void pdfi_gstate_from_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch, gsicc_profile_cache_t *profile_cache)
+int pdfi_gstate_from_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch, gsicc_profile_cache_t *profile_cache)
 {
+    int code;
     i_switch->pgs = ctx->pgs;
     i_switch->procs = pgs->client_procs;
     i_switch->client_data = (void *)pgs->client_data;
     i_switch->profile_cache = pgs->icc_profile_cache;
-    pgs->icc_profile_cache = profile_cache;
-    pdfi_gstate_set_client(ctx, pgs);
+    code = pdfi_gstate_set_client(ctx, pgs);
+    if (code < 0)
+        return code;
     i_switch->psfont = pgs->font;
+    pgs->icc_profile_cache = profile_cache;
+    rc_increment(pgs->icc_profile_cache);
     pgs->font = NULL;
     ctx->pgs = pgs;
-    return;
+    return code;
 }
 
 void pdfi_gstate_to_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch)
 {
-    pdf_font *f = pdfi_get_current_pdf_font(ctx);
     pgs->client_procs.free(pgs->client_data, pgs->memory, pgs);
     pgs->client_data = NULL;
+    rc_decrement(pgs->icc_profile_cache, "pdfi_gstate_to_PS");
     pgs->icc_profile_cache = i_switch->profile_cache;
     gs_gstate_set_client(pgs, i_switch->client_data, &i_switch->procs, true);
-    pdfi_countdown(f);
     ctx->pgs->font = NULL;
     ctx->pgs = i_switch->pgs;
     pgs->font = i_switch->psfont;

@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,14 +9,15 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Shading operations for the PDF interpreter */
 
 #include "pdf_int.h"
 #include "pdf_stack.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_shading.h"
 #include "pdf_dict.h"
@@ -54,13 +55,13 @@ static int pdfi_build_shading_function(pdf_context *ctx, gs_function_t **ppfn, c
     if (code < 0)
         goto build_shading_function_error;
 
-    if (o->type != PDF_DICT && o->type != PDF_STREAM) {
+    if (pdfi_type_of(o) != PDF_DICT && pdfi_type_of(o) != PDF_STREAM) {
         uint size;
         pdf_obj *rsubfn;
         gs_function_t **Functions;
         int64_t i;
 
-        if (o->type != PDF_ARRAY) {
+        if (pdfi_type_of(o) != PDF_ARRAY) {
             code = gs_error_typecheck;
             goto build_shading_function_error;
         }
@@ -77,7 +78,7 @@ static int pdfi_build_shading_function(pdf_context *ctx, gs_function_t **ppfn, c
         for (i = 0; i < size; ++i) {
             code = pdfi_array_get(ctx, (pdf_array *)o, i, &rsubfn);
             if (code == 0) {
-                if (rsubfn->type != PDF_DICT && rsubfn->type != PDF_STREAM)
+                if (pdfi_type_of(rsubfn) != PDF_DICT && pdfi_type_of(rsubfn) != PDF_STREAM)
                     code = gs_note_error(gs_error_typecheck);
             }
             if (code < 0) {
@@ -132,7 +133,7 @@ static int pdfi_shading1(pdf_context *ctx, gs_shading_params_t *pcommon,
     static const float default_Domain[4] = {0, 1, 0, 1};
     pdf_dict *shading_dict;
 
-    if (Shading->type != PDF_DICT)
+    if (pdfi_type_of(Shading) != PDF_DICT)
         return_error(gs_error_typecheck);
     shading_dict = (pdf_dict *)Shading;
 
@@ -178,7 +179,7 @@ static int pdfi_shading2(pdf_context *ctx, gs_shading_params_t *pcommon,
     int code, i;
     pdf_dict *shading_dict;
 
-    if (Shading->type != PDF_DICT)
+    if (pdfi_type_of(Shading) != PDF_DICT)
         return_error(gs_error_typecheck);
     shading_dict = (pdf_dict *)Shading;
 
@@ -230,7 +231,7 @@ static int pdfi_shading3(pdf_context *ctx,  gs_shading_params_t *pcommon,
     int code, i;
     pdf_dict *shading_dict;
 
-    if (Shading->type != PDF_DICT)
+    if (pdfi_type_of(Shading) != PDF_DICT)
         return_error(gs_error_typecheck);
     shading_dict = (pdf_dict *)Shading;
 
@@ -284,7 +285,7 @@ static int pdfi_build_mesh_shading(pdf_context *ctx, gs_shading_mesh_params_t *p
     int64_t i;
     pdf_dict *shading_dict;
 
-    if (Shading->type != PDF_STREAM)
+    if (pdfi_type_of(Shading) != PDF_STREAM)
         return_error(gs_error_typecheck);
 
     code = pdfi_dict_from_obj(ctx, Shading, &shading_dict);
@@ -633,6 +634,7 @@ static int get_shading_common(pdf_context *ctx, pdf_dict *shading_dict, gs_shadi
 get_shading_common_error:
     pdfi_countdown((pdf_obj *)a);
     gs_free_object(ctx->memory, params->Background, "Background (common_shading_error)");
+    params->Background = NULL;
     return code;
 }
 
@@ -810,7 +812,7 @@ pdfi_shading_setup_trans(pdf_context *ctx, pdfi_trans_state_t *state, pdf_obj *S
     /* If we didn't get a BBox for the shading, then we need to create one, in order to
      * pass it to the transparency setup, which (potentially, at least, uses it to set
      * up a transparency group.
-     * In the basence of anything better, we take the currnet clip, turn that into a path
+     * In the absence of anything better, we take the current clip, turn that into a path
      * and then get the bounding box of that path. Obviously we don't want to disturb the
      * current path in the graphics state, so we do a gsave/grestore round it.
      */
@@ -852,6 +854,7 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
     gs_shading_t *psh = NULL;
     gs_offset_t savedoffset;
     pdfi_trans_state_t trans_state;
+    int trans_required;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
@@ -859,17 +862,27 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
     if (ctx->text.BlockDepth != 0)
         pdfi_set_warning(ctx, 0, NULL, W_PDF_OPINVALIDINTEXT, "pdfi_shading", NULL);
 
-    if (pdfi_oc_is_off(ctx))
+    if (pdfi_oc_is_off(ctx)) {
+        pdfi_pop(ctx, 1);
         return 0;
-
-    n = (pdf_name *)ctx->stack_top[-1];
-    if (n->type != PDF_NAME)
-        return_error(gs_error_typecheck);
+    }
 
     savedoffset = pdfi_tell(ctx->main_stream);
+
+    n = (pdf_name *)ctx->stack_top[-1];
+    pdfi_countup(n);
+    pdfi_pop(ctx, 1);
+
+    if (pdfi_type_of(n) != PDF_NAME) {
+        code = gs_note_error(gs_error_typecheck);
+        goto exit1;
+    }
+
     code = pdfi_loop_detector_mark(ctx);
-    if (code < 0)
+    if (code < 0) {
+        pdfi_countdown(n);
         return code;
+    }
 
     code = pdfi_op_q(ctx);
     if (code < 0)
@@ -880,7 +893,7 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
     if (code < 0)
         goto exit2;
 
-    if (Shading->type != PDF_DICT && Shading->type != PDF_STREAM) {
+    if (pdfi_type_of(Shading) != PDF_DICT && pdfi_type_of(Shading) != PDF_STREAM) {
         code = gs_note_error(gs_error_typecheck);
         goto exit2;
     }
@@ -898,7 +911,9 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
     if (code < 0)
         goto exit2;
 
-    if (ctx->page.has_transparency) {
+    trans_required = pdfi_trans_required(ctx);
+
+    if (trans_required) {
         code = pdfi_shading_setup_trans(ctx, &trans_state, Shading);
         if (code < 0)
             goto exit2;
@@ -906,11 +921,11 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
 
     code = gs_shfill(ctx->pgs, psh);
     if (code < 0) {
-        pdfi_set_warning(ctx, 0, NULL, W_PDF_BADSHADING, "pdfi_rectpath", (char *)"ERROR: ignoring invalid smooth shading object, output may be incorrect");
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_BADSHADING, "pdfi_shading", (char *)"ERROR: ignoring invalid smooth shading object, output may be incorrect");
         code = 0;
     }
 
-    if (ctx->page.has_transparency) {
+    if (trans_required) {
         code1 = pdfi_trans_teardown(ctx, &trans_state);
         if (code == 0)
             code = code1;
@@ -925,7 +940,7 @@ int pdfi_shading(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
     if (code == 0)
         code = code1;
  exit1:
-    pdfi_pop(ctx, 1);
+    pdfi_countdown(n);
     (void)pdfi_loop_detector_cleartomark(ctx);
     pdfi_seek(ctx, ctx->main_stream, savedoffset, SEEK_SET);
     return code;

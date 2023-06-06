@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* PDF 1.4 blending functions */
@@ -242,7 +242,7 @@ pdf14_preserve_backdrop_cm(pdf14_buf *buf, cmm_profile_t *group_profile,
         rendering_params.graphics_type_tag = GS_IMAGE_TAG;
         rendering_params.override_icc = false;
         rendering_params.preserve_black = gsBKPRESNOTSPECIFIED;
-        rendering_params.rendering_intent = gsPERCEPTUAL;
+        rendering_params.rendering_intent = gsRELATIVECOLORIMETRIC;
         rendering_params.cmm = gsCMM_DEFAULT;
         /* Request the ICC link for the transform that we will need to use */
         icc_link = gsicc_get_link_profile(pgs, dev, tos_profile, group_profile,
@@ -682,7 +682,7 @@ dump_planar_rgba(gs_memory_t *mem, const pdf14_buf *pbuf)
     info_ptr->color_type = PNG_COLOR_TYPE_RGB_ALPHA;
 
     /* add comment */
-    gs_sprintf(software_text, "%s %d.%02d", gs_product,
+    gs_snprintf(software_text, sizeof(software_text), "%s %d.%02d", gs_product,
             (int)(gs_revision / 100), (int)(gs_revision % 100));
     text_png.compression = -1;	/* uncompressed */
     text_png.key = (char *)software_key;	/* not const, unfortunately */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -659,7 +659,7 @@ gx_device_init_on_stack(gx_device * dev, const gx_device * proto,
     dev->retained = 0;
     dev->pad = proto->pad;
     dev->log2_align_mod = proto->log2_align_mod;
-    dev->is_planar = proto->is_planar;
+    dev->num_planar_planes = proto->num_planar_planes;
     rc_init(dev, NULL, 0);
 }
 
@@ -813,19 +813,15 @@ gx_device_raster(const gx_device * dev, bool pad)
     ulong raster;
     int l2align;
 
-    if (dev->is_planar) {
-        int num_components = dev->color_info.num_components;
+    if (dev->num_planar_planes) {
+        int num_components = dev->num_planar_planes;
         /* bpc accounts for unused bits, e.g. depth==4, num_comp==3, or depth==8, num_comps==5 */
         int bpc = depth / num_components;
 
         /* depth can be <= num_components if planar and MEM_SET_PARAMS has changed it */
         if (depth <= num_components || bpc >= 8) {
-            /* tag plane requires at least 8 bits (per component as well as tags) */
-            int has_tags = bpc >= 8 ? device_encodes_tags(dev): 0;
-
-            bits /= (num_components + has_tags);
-        }
-        else {
+            bits /= num_components;
+        } else {
             /* depth is original depth, not the plane_depth since it is > num_components */
             bits /= (depth / bpc);
         }
@@ -858,7 +854,7 @@ uint
 gx_device_raster_plane(const gx_device * dev, const gx_render_plane_t *render_plane)
 {
     ulong bpc = (render_plane && render_plane->index >= 0 ?
-        render_plane->depth : dev->color_info.depth/(dev->is_planar ? dev->color_info.num_components : 1));
+        render_plane->depth : dev->color_info.depth/(dev->num_planar_planes ? dev->num_planar_planes : 1));
     ulong bits = (ulong) dev->width * bpc;
     int l2align;
 
@@ -1206,13 +1202,15 @@ int gx_device_delete_output_file(const gx_device * dev, const char *fname)
     const char *fmt;
     char *pfname = (char *)gs_alloc_bytes(dev->memory, gp_file_name_sizeof, "gx_device_delete_output_file(pfname)");
     int code;
+    size_t len;
 
     if (pfname == NULL) {
         code = gs_note_error(gs_error_VMerror);
         goto done;
     }
 
-    code = gx_parse_output_file_name(&parsed, &fmt, fname, strlen(fname),
+    len = strlen(fname);
+    code = gx_parse_output_file_name(&parsed, &fmt, fname, len,
                                          dev->memory);
     if (code < 0) {
         goto done;
@@ -1227,11 +1225,11 @@ int gx_device_delete_output_file(const gx_device * dev, const char *fname)
         while (*fmt != 'l' && *fmt != '%')
             --fmt;
         if (*fmt == 'l')
-            gs_sprintf(pfname, parsed.fname, count1);
+            gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname, count1);
         else
-            gs_sprintf(pfname, parsed.fname, (int)count1);
+            gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname, (int)count1);
     } else if (parsed.len && strchr(parsed.fname, '%'))	/* filename with "%%" but no "%nnd" */
-        gs_sprintf(pfname, parsed.fname);
+        gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname);
     else
         pfname[0] = 0; /* 0 to use "fname", not "pfname" */
     if (pfname[0]) {
@@ -1304,11 +1302,11 @@ gx_device_open_output_file(const gx_device * dev, char *fname,
         while (*fmt != 'l' && *fmt != '%')
             --fmt;
         if (*fmt == 'l')
-            gs_sprintf(pfname, parsed.fname, count1);
+            gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname, count1);
         else
-            gs_sprintf(pfname, parsed.fname, (int)count1);
+            gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname, (int)count1);
     } else if (parsed.len && strchr(parsed.fname, '%'))	/* filename with "%%" but no "%nnd" */
-        gs_sprintf(pfname, parsed.fname);
+        gs_snprintf(pfname, gp_file_name_sizeof, parsed.fname);
     else
         pfname[0] = 0; /* 0 to use "fname", not "pfname" */
     if (pfname[0]) {

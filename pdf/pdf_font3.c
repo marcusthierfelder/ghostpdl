@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* code for type 3 font handling */
@@ -19,24 +19,16 @@
 #include "pdf_stack.h"
 #include "pdf_array.h"
 #include "pdf_dict.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_font.h"
 #include "pdf_font3.h"
-#include "pdf_font_types.h"
 #include "pdf_deref.h"
 #include "gscencs.h"
 #include "gscedata.h"       /* For the encoding arrays */
 #include "gsccode.h"        /* For the Encoding indices */
 #include "gsuid.h"          /* For no_UniqueID */
 #include "gsutil.h"        /* For gs_next_ids() */
-
-static void pdfi_type3_copy_color(gs_gstate_color *src, gs_gstate_color *dest)
-{
-    *dest->ccolor = *src->ccolor;
-    *dest->dev_color = *src->dev_color;
-    dest->color_space = src->color_space;
-    dest->effective_opm = src->effective_opm;
-}
 
 static int
 pdfi_type3_build_char(gs_show_enum * penum, gs_gstate * pgs, gs_font * pfont,
@@ -74,53 +66,36 @@ pdfi_type3_build_char(gs_show_enum * penum, gs_gstate * pgs, gs_font * pfont,
     }
     if (code < 0)
         goto build_char_error;
-    if (CharProc->type != PDF_STREAM) {
+    if (pdfi_type_of(CharProc) != PDF_STREAM) {
         code = gs_note_error(gs_error_typecheck);
         goto build_char_error;
     }
 
     OBJ_CTX(font)->text.BlockDepth = 0;
     OBJ_CTX(font)->text.inside_CharProc = true;
-    OBJ_CTX(font)->text.CharProc_is_d1 = false;
+    OBJ_CTX(font)->text.CharProc_d_type = pdf_type3_d_none;
 
-    {
-        /* It turns out that if a type 3 font uses a stroke to draw, and does not
-         * acrually set the stroke colour, then we must use the fill colour instead.
-         * In effect we start a type 3 BuildChar with stroke colour = fill colour.
-         * That is annoyingly difficult to set up. We need to copy the existing
-         * colour values from the structures in the gs_gstate_color structures into
-         * temporary copies and copy the colour space pointer (and keep its reference
-         * count correct). Then copy the fill colour values and ponter to the stroke
-         * structures. Finally, after drawing the character, copy the temporary
-         * saved copies back again.
-         */
-        gs_gstate_color tmp_color;
-        gs_client_color tmp_cc;
-        gx_device_color tmp_dc;
-
-        /* Set up the pointers in the gs_gstate_color structure to point to
-         * the temporary structures we have on the stack.
-         */
-        tmp_color.ccolor = &tmp_cc;
-        tmp_color.dev_color = &tmp_dc;
-
-        /* Use the utility routine above to copy the stroke colour to the temporary copy */
-        pdfi_type3_copy_color(&OBJ_CTX(font)->pgs->color[1], &tmp_color);
-        rc_increment_cs(tmp_color.color_space);
-        /* Use the utility routine above to copy the fill colour to the stroke colour */
-        pdfi_type3_copy_color(&OBJ_CTX(font)->pgs->color[0], &OBJ_CTX(font)->pgs->color[1]);
-
-        pdfi_gsave(OBJ_CTX(font));
-        pdfi_run_context(OBJ_CTX(font), CharProc, font->PDF_font, true, "CharProc");
-        pdfi_grestore(OBJ_CTX(font));
-
-        /* Use the utility routine above to copy the temporary copy to the stroke colour */
-        pdfi_type3_copy_color(&tmp_color, &OBJ_CTX(font)->pgs->color[1]);
-        rc_decrement_cs(tmp_color.color_space, "pdfi_type3_build_char");
+    /* We used to have code here to emulate some Acrobat behaviour, but it interferes with getting
+     * the result of /tests/pdf/safedocs/ContentStreamNoCycleType3insideType3.pdf because for that
+     * file the nested type 3 font CharProc must inherit the stroke colour from the outer type 3
+     * font CharProc graphics state at the time the glyph is drawn. So the code was removed. The
+     * Acrobat behaviour is not mentioned in the spec and Acrobat is completely incapable of
+     * getting Patterns right, per the spec, when they are 'inside' multiple levels of content
+     * streams.
+     * The old comment began :
+     *
+     *    * It turns out that if a type 3 font uses a stroke to draw, and does not
+     *    * acrually set the stroke colour, then we must use the fill colour instead.
+     *    * In effect we start a type 3 BuildChar with stroke colour = fill colour.
+     */
+    code = pdfi_gsave(OBJ_CTX(font));
+    if (code >= 0) {
+        code = pdfi_run_context(OBJ_CTX(font), CharProc, font->PDF_font, true, "CharProc");
+        (void)pdfi_grestore(OBJ_CTX(font));
     }
 
     OBJ_CTX(font)->text.inside_CharProc = false;
-    OBJ_CTX(font)->text.CharProc_is_d1 = false;
+    OBJ_CTX(font)->text.CharProc_d_type = pdf_type3_d_none;
     OBJ_CTX(font)->text.BlockDepth = SavedTextBlockDepth;
 
 build_char_error:
@@ -221,6 +196,8 @@ int pdfi_free_font_type3(pdf_obj *font)
     pdfi_countdown(t3font->CharProcs);
     pdfi_countdown(t3font->Encoding);
     pdfi_countdown(t3font->ToUnicode);
+    pdfi_countdown(t3font->filename); /* Should never exist, but just in case */
+
     gs_free_object(OBJ_MEMORY(font), font, "Free type 3 font");
     return 0;
 }
@@ -228,10 +205,9 @@ int pdfi_free_font_type3(pdf_obj *font)
 
 int pdfi_read_type3_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream_dict, pdf_dict *page_dict, pdf_font **ppdffont)
 {
-    int code = 0, i, num_chars = 0;
+    int code = 0;
     pdf_font_type3 *font = NULL;
     pdf_obj *obj = NULL;
-    double f;
     pdf_obj *tounicode = NULL;
 
     *ppdffont = NULL;
@@ -269,44 +245,24 @@ int pdfi_read_type3_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
     if (code < 0)
         goto font3_error;
 
-    code = pdfi_dict_get_number(ctx, font_dict, "FirstChar", &f);
-    if (code < 0)
-        goto font3_error;
-    font->FirstChar = (int)f;
 
-    code = pdfi_dict_get_number(ctx, font_dict, "LastChar", &f);
-    if (code < 0)
-        goto font3_error;
-    font->LastChar = (int)f;
-
-    num_chars = (font->LastChar - font->FirstChar) + 1;
     code = pdfi_dict_knownget_type(ctx, font_dict, "FontDescriptor", PDF_DICT, (pdf_obj **)&font->FontDescriptor);
     if (code < 0)
         goto font3_error;
 
-    code = pdfi_dict_knownget_type(ctx, font_dict, "Widths", PDF_ARRAY, (pdf_obj **)&obj);
-    if (code < 0)
-        goto font3_error;
-    if (code > 0) {
-        if (num_chars != pdfi_array_size((pdf_array *)obj)) {
-            code = gs_note_error(gs_error_rangecheck);
-            goto font3_error;
-        }
+    if (font->FontDescriptor != NULL) {
+        pdf_obj *Name = NULL;
 
-        font->Widths = (double *)gs_alloc_bytes(ctx->memory, sizeof(double) * num_chars, "type 3 font Widths array");
-        if (font->Widths == NULL) {
-            code = gs_note_error(gs_error_VMerror);
-            goto font3_error;
-        }
-        memset(font->Widths, 0x00, sizeof(double) * num_chars);
-        for (i = 0; i < num_chars; i++) {
-            code = pdfi_array_get_number(ctx, (pdf_array *)obj, (uint64_t)i, &font->Widths[i]);
-            if (code < 0)
-                goto font3_error;
-        }
+        code = pdfi_dict_get_type(ctx, (pdf_dict *) font->FontDescriptor, "FontName", PDF_NAME, (pdf_obj**)&Name);
+        if (code < 0)
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_FDESC_BAD_FONTNAME, "pdfi_load_font", "");
+        pdfi_countdown(Name);
     }
-    pdfi_countdown(obj);
-    obj = NULL;
+
+    pdfi_font_set_first_last_char(ctx, font_dict, (pdf_font *)font);
+    /* ignore errors with widths... for now */
+    (void)pdfi_font_create_widths(ctx, font_dict, (pdf_font*)font, 1.0);
+
 
     code = pdfi_dict_get(ctx, font_dict, "Encoding", &obj);
     if (code < 0)
@@ -322,13 +278,13 @@ int pdfi_read_type3_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
 
     if (ctx->args.ignoretounicode != true) {
         code = pdfi_dict_get(ctx, font_dict, "ToUnicode", (pdf_obj **)&tounicode);
-        if (code >= 0 && tounicode->type == PDF_STREAM) {
+        if (code >= 0 && pdfi_type_of(tounicode) == PDF_STREAM) {
             pdf_cmap *tu = NULL;
             code = pdfi_read_cmap(ctx, tounicode, &tu);
             pdfi_countdown(tounicode);
             tounicode = (pdf_obj *)tu;
         }
-        if (code < 0 || (tounicode != NULL && tounicode->type != PDF_CMAP)) {
+        if (code < 0 || (tounicode != NULL && pdfi_type_of(tounicode) != PDF_CMAP)) {
             pdfi_countdown(tounicode);
             tounicode = NULL;
             code = 0;

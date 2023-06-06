@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -639,10 +639,13 @@ gx_default_fill_path_shading_or_pattern(gx_device * pdev, const gs_gstate * pgs,
                 set_dev_proc(&cdev, fill_path, pass_shading_area_through_clip_path_device);
             code = 0;
         }
-        if (code >= 0)
-            code = pdevc->type->fill_rectangle(pdevc,
+        if (code >= 0) {
+            /* Check clip rectangle covers an actual area */
+            if (cb.p.x != cb.q.x && cb.p.y != cb.q.y)
+                code = pdevc->type->fill_rectangle(pdevc,
                         cb.p.x, cb.p.y, cb.q.x - cb.p.x, cb.q.y - cb.p.y,
                         dev, pgs->log_op, rs);
+        }
     }
     if (ppath != NULL)
         gx_cpath_free(&cpath_intersection, "shading_fill_cpath_intersection");
@@ -668,6 +671,15 @@ gx_default_fill_path(gx_device * pdev, const gs_gstate * pgs,
         return gx_default_fill_path_shading_or_pattern(pdev, pgs, ppath, params, pdevc, pcpath);
     else
         return gx_general_fill_path(pdev, pgs, ppath, params, pdevc, pcpath);
+}
+
+int
+gx_default_lock_pattern(gx_device *pdev,
+                        gs_gstate *pgs,
+                        gs_id      pattern_id,
+                        int        lock)
+{
+    return gx_pattern_cache_entry_set_lock(pgs, pattern_id, lock);
 }
 
 /*

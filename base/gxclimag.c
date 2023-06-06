@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -476,7 +476,7 @@ clist_begin_typed_image(gx_device * dev, const gs_gstate * pgs,
     bool bp_changed = false;
     cmm_dev_profile_t *dev_profile = NULL;
     cmm_profile_t *gs_output_profile;
-    bool is_planar_dev = dev->is_planar;
+    bool is_planar_dev = !!dev->num_planar_planes;
     bool render_is_valid;
     int csi;
     gx_clip_path *lpcpath = NULL;
@@ -1885,6 +1885,17 @@ image_band_box(gx_device * dev, const clist_image_enum * pie, int y, int h,
     return (pbox->p.x < pbox->q.x && pbox->p.y < pbox->q.y);
 }
 
+inline static bool
+icc_info_notequal(clist_icc_color_t info1, clist_icc_color_t info2)
+{
+    if (info1.data_cs != info2.data_cs || info1.default_match != info2.default_match ||
+        info1.icc_num_components != info2.icc_num_components || info1.is_lab != info2.is_lab ||
+        info1.icc_hash != info2.icc_hash)
+        return true;
+    else
+        return false;
+}
+
 /* Determine which image-related properties are unknown */
 static uint     /* mask of unknown properties(see pcls->known) */
 clist_image_unknowns(gx_device *dev, const clist_image_enum *pie)
@@ -1914,10 +1925,12 @@ clist_image_unknowns(gx_device *dev, const clist_image_enum *pie)
         cdev->color_space.space = 0; /* for GC */
     } else {                    /* not masked */
         if (cdev->color_space.id != pie->color_space.id ||
-            cdev->color_space.space != pie->color_space.space) {
+            cdev->color_space.space != pie->color_space.space ||
+            icc_info_notequal(cdev->color_space.icc_info, pie->color_space.icc_info)) {
             unknown |= color_space_known;
             cdev->color_space.space = pie->color_space.space;
             cdev->color_space = pie->color_space;
+            memcpy(&(cdev->color_space.icc_info), &(pie->color_space.icc_info), sizeof(clist_icc_color_t));
         }
     }
     if (cdev->gs_gstate.fill_adjust.x != pgs->fill_adjust.x ||

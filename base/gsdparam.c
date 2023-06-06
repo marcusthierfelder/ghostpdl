@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Default device parameters for Ghostscript library */
@@ -26,11 +26,16 @@
 #include "gxfixed.h"
 #include "gsicc_manage.h"
 #include "gdevnup.h"		/* to install N-up subclass device */
+#include "gp_utf8.h"
+
 extern gx_device_nup gs_nup_device;
 
 /* Define whether we accept PageSize as a synonym for MediaSize. */
 /* This is for backward compatibility only. */
 #define PAGESIZE_IS_MEDIASIZE
+
+#define BLACKTHRESHOLDL 90
+#define BLACKTHRESHOLDC 3
 
 /* Names corresponding to gs_overprint_control_t enum */
 static const char *const overprint_control_names[] = {
@@ -76,6 +81,48 @@ gs_get_device_or_hw_params(gx_device * orig_dev, gs_param_list * plist,
     return code;
 }
 
+static int
+get_dev_icccolorants_utf8(gs_memory_t *mem, cmm_dev_profile_t *dev_profile, char **putf8)
+{
+    char *colorants = gsicc_get_dev_icccolorants(dev_profile);
+    char *utf8;
+    unsigned char *s;
+    unsigned short *unicode, *u;
+    size_t len;
+
+    if (colorants == NULL)
+    {
+        *putf8 = NULL;
+        return 0;
+    }
+
+    len = strlen(colorants);
+
+    /* Convert our 8 bit raw bytes into 16 bit raw. */
+    unicode = (unsigned short *)gs_alloc_bytes(mem, (len+1)*sizeof(unsigned short), "get_dev_icccolorants_utf8");
+    if (unicode == NULL)
+        return_error(gs_error_VMerror);
+
+    u = unicode;
+    s = (unsigned char *)colorants;
+    while ((*u++ = *s++) != 0);
+
+    /* Now utf-8 encode that. */
+    len = gp_uint16_to_utf8(NULL, unicode);
+    utf8 = (char *)gs_alloc_bytes(mem, len, "get_dev_icccolorants_utf8");
+    if (utf8 == NULL) {
+        gs_free_object(mem, unicode, "get_dev_icccolorants_utf8");
+        return_error(gs_error_VMerror);
+    }
+    gp_uint16_to_utf8(utf8, unicode);
+
+    gs_free_object(mem, unicode, "get_dev_icccolorants_utf8");
+    *putf8 = utf8;
+
+    return 0;
+}
+
+
 int gx_default_get_param(gx_device *dev, char *Param, void *list)
 {
     gs_param_list * plist = (gs_param_list *)list;
@@ -96,6 +143,9 @@ int gx_default_get_param(gx_device *dev, char *Param, void *list)
     bool graydetection = false;
     bool usefastcolor = false;  /* set for unmanaged color */
     bool blacktext = false;
+    bool blackvector = false;
+    float blackthresholdL = BLACKTHRESHOLDL;
+    float blackthresholdC = BLACKTHRESHOLDC;
     /* By default overprinting only valid with cmyk devices */
     gs_overprint_control_t overprint_control = gs_overprint_control_enable;
     bool prebandthreshold = true, temp_bool = false;
@@ -354,6 +404,9 @@ int gx_default_get_param(gx_device *dev, char *Param, void *list)
         graydetection = dev_profile->graydetection;
         usefastcolor = dev_profile->usefastcolor;
         blacktext = dev_profile->blacktext;
+        blackvector = dev_profile->blackvector;
+        blackthresholdC = dev_profile->blackthresholdC;
+        blackthresholdL = dev_profile->blackthresholdL;
         overprint_control = dev_profile->overprint_control;
         prebandthreshold = dev_profile->prebandthreshold;
         /* With respect to Output profiles that have non-standard colorants,
@@ -364,10 +417,12 @@ int gx_default_get_param(gx_device *dev, char *Param, void *list)
         } else {
             char *colorant_names;
 
-            colorant_names =
-                gsicc_get_dev_icccolorants(dev_profile);
+            code = get_dev_icccolorants_utf8(dev->memory, dev_profile, &colorant_names);
+            if (code < 0)
+                return code;
             if (colorant_names != NULL) {
                 param_string_from_transient_string(icc_colorants, colorant_names);
+                gs_free_object(dev->memory, colorant_names, "gx_default_get_param");
             } else {
                 param_string_from_string(icc_colorants, null_str);
             }
@@ -396,6 +451,15 @@ int gx_default_get_param(gx_device *dev, char *Param, void *list)
     }
     if (strcmp(Param, "BlackText") == 0) {
         return param_write_bool(plist, "BlackText", &blacktext);
+    }
+    if (strcmp(Param, "BlackVector") == 0) {
+        return param_write_bool(plist, "BlackVector", &blackvector);
+    }
+    if (strcmp(Param, "BlackThresholdL") == 0) {
+        return param_write_float(plist, "BlackThresholdL", &blackthresholdL);
+    }
+    if (strcmp(Param, "BlackThresholdC") == 0) {
+        return param_write_float(plist, "BlackThresholdC", &blackthresholdC);
     }
     if (strcmp(Param, "Overprint") == 0) {
         gs_param_string opc_name;
@@ -539,6 +603,9 @@ gx_default_get_params(gx_device * dev, gs_param_list * plist)
     bool graydetection = false;
     bool usefastcolor = false;  /* set for unmanaged color */
     bool blacktext = false;
+    bool blackvector = false;
+    float blackthresholdL = BLACKTHRESHOLDL;
+    float blackthresholdC = BLACKTHRESHOLDC;
     /* By default, only overprint if the device supports it */
     gs_overprint_control_t overprint_control = gs_overprint_control_enable;
     bool prebandthreshold = true, temp_bool;
@@ -654,6 +721,9 @@ gx_default_get_params(gx_device * dev, gs_param_list * plist)
         graydetection = dev_profile->graydetection;
         usefastcolor = dev_profile->usefastcolor;
         blacktext = dev_profile->blacktext;
+        blackvector = dev_profile->blackvector;
+        blackthresholdC = dev_profile->blackthresholdC;
+        blackthresholdL = dev_profile->blackthresholdL;
         overprint_control = dev_profile->overprint_control;
         prebandthreshold = dev_profile->prebandthreshold;
         /* With respect to Output profiles that have non-standard colorants,
@@ -664,10 +734,12 @@ gx_default_get_params(gx_device * dev, gs_param_list * plist)
         } else {
             char *colorant_names;
 
-            colorant_names =
-                gsicc_get_dev_icccolorants(dev_profile);
+            code = get_dev_icccolorants_utf8(dev->memory, dev_profile, &colorant_names);
+            if (code < 0)
+                return code;
             if (colorant_names != NULL) {
                 param_string_from_transient_string(icc_colorants, colorant_names);
+                gs_free_object(dev->memory, colorant_names, "gx_default_get_param");
             } else {
                 param_string_from_string(icc_colorants, null_str);
             }
@@ -715,6 +787,9 @@ gx_default_get_params(gx_device * dev, gs_param_list * plist)
         (code = param_write_bool(plist, "GrayDetection", &graydetection)) < 0 ||
         (code = param_write_bool(plist, "UseFastColor", &usefastcolor)) < 0 ||
         (code = param_write_bool(plist, "BlackText", &blacktext)) < 0 ||
+        (code = param_write_bool(plist, "BlackVector", &blackvector)) < 0 ||
+        (code = param_write_float(plist, "BlackThresholdL", &blackthresholdL)) < 0 ||
+        (code = param_write_float(plist, "BlackThresholdC", &blackthresholdC)) < 0 ||
         (code = param_write_bool(plist, "PreBandThreshold", &prebandthreshold)) < 0 ||
         (code = param_write_string(plist,"OutputICCProfile", &(profile_array[0]))) < 0 ||
         (code = param_write_string(plist,"VectorICCProfile", &(profile_array[1]))) < 0 ||
@@ -921,7 +996,7 @@ gdev_write_input_media(int index, gs_param_dict * pdict,
     int code;
     gs_param_string as;
 
-    gs_sprintf(key, "%d", index);
+    gs_snprintf(key, sizeof(key), "%d", index);
     mdict.size = 4;
     code = param_begin_write_dict(pdict->list, key, &mdict, false);
     if (code < 0)
@@ -1009,7 +1084,7 @@ gdev_write_output_media(int index, gs_param_dict * pdict,
     gs_param_dict mdict;
     int code;
 
-    gs_sprintf(key, "%d", index);
+    gs_snprintf(key, sizeof(key), "%d", index);
     mdict.size = 4;
     code = param_begin_write_dict(pdict->list, key, &mdict, false);
     if (code < 0)
@@ -1239,6 +1314,62 @@ gx_default_put_blacktext(bool blacktext, gx_device* dev)
 }
 
 static int
+gx_default_put_blackthresholds(float blackthresholdL, float blackthresholdC, gx_device *dev)
+{
+    int code = 0;
+    cmm_dev_profile_t* profile_struct;
+
+    if (dev_proc(dev, get_profile) == NULL) {
+        if (dev->icc_struct == NULL) {
+            dev->icc_struct = gsicc_new_device_profile_array(dev);
+            if (dev->icc_struct == NULL)
+                return_error(gs_error_VMerror);
+        }
+        dev->icc_struct->blackthresholdL = blackthresholdL;
+        dev->icc_struct->blackthresholdC = blackthresholdC;
+    } else {
+        code = dev_proc(dev, get_profile)(dev, &profile_struct);
+        if (profile_struct == NULL) {
+            /* Create now  */
+            dev->icc_struct = gsicc_new_device_profile_array(dev);
+            profile_struct = dev->icc_struct;
+            if (profile_struct == NULL)
+                return_error(gs_error_VMerror);
+        }
+        profile_struct->blackthresholdL = blackthresholdL;
+        profile_struct->blackthresholdC = blackthresholdC;
+    }
+    return code;
+}
+
+static int
+gx_default_put_blackvector(bool blackvector, gx_device* dev)
+{
+    int code = 0;
+    cmm_dev_profile_t* profile_struct;
+
+    if (dev_proc(dev, get_profile) == NULL) {
+        if (dev->icc_struct == NULL) {
+            dev->icc_struct = gsicc_new_device_profile_array(dev);
+            if (dev->icc_struct == NULL)
+                return_error(gs_error_VMerror);
+        }
+        dev->icc_struct->blackvector = blackvector;
+    } else {
+        code = dev_proc(dev, get_profile)(dev, &profile_struct);
+        if (profile_struct == NULL) {
+            /* Create now  */
+            dev->icc_struct = gsicc_new_device_profile_array(dev);
+            profile_struct = dev->icc_struct;
+            if (profile_struct == NULL)
+                return_error(gs_error_VMerror);
+        }
+        profile_struct->blackvector = blackvector;
+    }
+    return code;
+}
+
+static int
 gx_default_put_overprint_control(gs_overprint_control_t overprint_control, gx_device * dev)
 {
     int code = 0;
@@ -1398,6 +1529,10 @@ gx_default_put_icc_colorants(gs_param_string *colorants, gx_device * dev)
 {
     char *tempstr;
     int code;
+    int len;
+    unsigned short *tempstr2;
+    unsigned short *s;
+    char *d;
 
     if (colorants->size == 0) return 0;
 
@@ -1405,11 +1540,44 @@ gx_default_put_icc_colorants(gs_param_string *colorants, gx_device * dev)
     fill_dev_proc(dev, get_profile, gx_default_get_profile);
     tempstr = (char *) gs_alloc_bytes(dev->memory, colorants->size+1,
                                       "gx_default_put_icc_colorants");
+    if (tempstr == NULL)
+        return_error(gs_error_VMerror);
+
     memcpy(tempstr, colorants->data, colorants->size);
     /* Set last position to NULL. */
     tempstr[colorants->size] = 0;
-    code = gsicc_set_device_profile_colorants(dev, tempstr);
+
+    /* The input colorants string is UTF-8 encoded. We want it to be put into the
+     * device as 8-bit 'raw' values. We therefore need to decode it here. Any
+     * UTF-8 chars that do not decode to 8 bits will be flagged up as a rangecheck.
+     */
+    len = gp_utf8_to_uint16(NULL, tempstr);
+    tempstr2 = (unsigned short *)gs_alloc_bytes(dev->memory, len * sizeof(unsigned short),
+                                                "gx_default_put_icc_colorants");
+    if (tempstr2 == NULL)
+    {
+        gs_free_object(dev->memory, tempstr, "gx_default_put_icc_colorants");
+        return_error(gs_error_VMerror);
+    }
+    len = gp_utf8_to_uint16(tempstr2, tempstr);
+
+    /* Now convert down to 8 bits. Reuse tempstr here, because we know it will
+     * be large enough. */
+    code = 0;
+    for (s = tempstr2, d = tempstr; *s; s++, d++)
+    {
+        unsigned short v = *s;
+        if (v & 0xff00)
+            code = gs_note_error(gs_error_rangecheck);
+        *d = v & 0xff;
+    }
+
+    if (code < 0)
+        emprintf(dev->memory, "ICCColorants must fit (unencoded) in 8 bits");
+    else
+        code = gsicc_set_device_profile_colorants(dev, tempstr);
     gs_free_object(dev->memory, tempstr, "gx_default_put_icc_colorants");
+    gs_free_object(dev->memory, tempstr2, "gx_default_put_icc_colorants");
     return code;
 }
 
@@ -1461,7 +1629,7 @@ rc_free_pages_list(gs_memory_t * mem, void *ptr_in, client_name_t cname)
     gdev_pagelist *PageList = (gdev_pagelist *)ptr_in;
 
     if (PageList->rc.ref_count <= 1) {
-        gs_free(mem->non_gc_memory, PageList->Pages, 1, PagesSize, "free page list");
+        gs_free(mem->non_gc_memory, PageList->Pages, 1, strlen(PageList->Pages), "free page list");
         gs_free(mem->non_gc_memory, PageList, 1, sizeof(gdev_pagelist), "free structure to hold page list");
     }
 }
@@ -1515,6 +1683,9 @@ gx_default_put_params(gx_device * dev, gs_param_list * plist)
     bool graydetection = false;
     bool usefastcolor = false;
     bool blacktext = false;
+    bool blackvector = false;
+    float blackthresholdL = BLACKTHRESHOLDL;
+    float blackthresholdC = BLACKTHRESHOLDC;
     gs_overprint_control_t overprint_control = gs_overprint_control_enable;
     bool prebandthreshold = false;
     bool use_antidropout = dev->color_info.use_antidropout_downscaler;
@@ -1535,6 +1706,9 @@ gx_default_put_params(gx_device * dev, gs_param_list * plist)
         devicegraytok = dev->icc_struct->devicegraytok;
         usefastcolor = dev->icc_struct->usefastcolor;
         blacktext = dev->icc_struct->blacktext;
+        blackvector = dev->icc_struct->blackvector;
+        blackthresholdL = dev->icc_struct->blackthresholdL;
+        blackthresholdC = dev->icc_struct->blackthresholdC;
         prebandthreshold = dev->icc_struct->prebandthreshold;
         overprint_control = dev->icc_struct->overprint_control;
     } else {
@@ -1850,6 +2024,21 @@ nce:
         ecode = code;
         param_signal_error(plist, param_name, ecode);
     }
+    if ((code = param_read_bool(plist, (param_name = "BlackVector"),
+                                                        &blackvector)) < 0) {
+        ecode = code;
+        param_signal_error(plist, param_name, ecode);
+    }
+    if ((code = param_read_float(plist, (param_name = "BlackThresholdL"),
+                                                        &blackthresholdL)) < 0) {
+        ecode = code;
+        param_signal_error(plist, param_name, ecode);
+    }
+    if ((code = param_read_float(plist, (param_name = "BlackThresholdC"),
+                                                        &blackthresholdC)) < 0) {
+        ecode = code;
+        param_signal_error(plist, param_name, ecode);
+    }
     if ((code = param_put_enum(plist, "Overprint",
                            (int*)&overprint_control, overprint_control_names, ecode)) < 0) {
         ecode = code;
@@ -2108,7 +2297,6 @@ label:\
         }
         memset(dev->PageList->Pages, 0x00, pagelist.size + 1);
         memcpy(dev->PageList->Pages, pagelist.data, pagelist.size);
-        dev->PageList->PagesSize = pagelist.size + 1;
         rc_init_free(dev->PageList, dev->memory->non_gc_memory, 1, rc_free_pages_list);
     }
 
@@ -2246,45 +2434,43 @@ label:\
 
     /* Take care of the rendering intents and blackpts.  For those that
        are not set special, the default provides an override */
-    if (dev->icc_struct != NULL) {
-        /* Set the default object */
-        code = gx_default_put_intent(rend_intent[0], dev, gsDEFAULTPROFILE);
-        if (code < 0)
-            return code;
-        code = gx_default_put_blackptcomp(blackptcomp[0], dev, gsDEFAULTPROFILE);
-        if (code < 0)
-            return code;
-        code = gx_default_put_blackpreserve(blackpreserve[0], dev, gsDEFAULTPROFILE);
-        if (code < 0)
-            return code;
-        /* If the default was specified and not a specialized one (e.g. graphic
-           image or text) then the special one will get set to the default.  */
-        for (k = 1; k < NUM_DEVICE_PROFILES; k++) {
-            if (rend_intent[0] != gsRINOTSPECIFIED &&
-                rend_intent[k] == gsRINOTSPECIFIED) {
-                code = gx_default_put_intent(rend_intent[0], dev, profile_types[k]);
-            } else {
-                code = gx_default_put_intent(rend_intent[k], dev, profile_types[k]);
-            }
-            if (code < 0)
-                return code;
-            if (blackptcomp[0] != gsBPNOTSPECIFIED &&
-                blackptcomp[k] == gsBPNOTSPECIFIED) {
-                code = gx_default_put_blackptcomp(blackptcomp[0], dev, profile_types[k]);
-            } else {
-                code = gx_default_put_blackptcomp(blackptcomp[k], dev, profile_types[k]);
-            }
-            if (code < 0)
-                return code;
-            if (blackpreserve[0] != gsBKPRESNOTSPECIFIED &&
-                blackpreserve[k] == gsBKPRESNOTSPECIFIED) {
-                code = gx_default_put_blackpreserve(blackpreserve[0], dev, profile_types[k]);
-            } else {
-                code = gx_default_put_blackpreserve(blackpreserve[k], dev, profile_types[k]);
-            }
-            if (code < 0)
-                return code;
+    /* Set the default object */
+    code = gx_default_put_intent(rend_intent[0], dev, gsDEFAULTPROFILE);
+    if (code < 0)
+        return code;
+    code = gx_default_put_blackptcomp(blackptcomp[0], dev, gsDEFAULTPROFILE);
+    if (code < 0)
+        return code;
+    code = gx_default_put_blackpreserve(blackpreserve[0], dev, gsDEFAULTPROFILE);
+    if (code < 0)
+        return code;
+    /* If the default was specified and not a specialized one (e.g. graphic
+       image or text) then the special one will get set to the default.  */
+    for (k = 1; k < NUM_DEVICE_PROFILES; k++) {
+        if (rend_intent[0] != gsRINOTSPECIFIED &&
+            rend_intent[k] == gsRINOTSPECIFIED) {
+            code = gx_default_put_intent(rend_intent[0], dev, profile_types[k]);
+        } else {
+            code = gx_default_put_intent(rend_intent[k], dev, profile_types[k]);
         }
+        if (code < 0)
+            return code;
+        if (blackptcomp[0] != gsBPNOTSPECIFIED &&
+            blackptcomp[k] == gsBPNOTSPECIFIED) {
+            code = gx_default_put_blackptcomp(blackptcomp[0], dev, profile_types[k]);
+        } else {
+            code = gx_default_put_blackptcomp(blackptcomp[k], dev, profile_types[k]);
+        }
+        if (code < 0)
+            return code;
+        if (blackpreserve[0] != gsBKPRESNOTSPECIFIED &&
+            blackpreserve[k] == gsBKPRESNOTSPECIFIED) {
+            code = gx_default_put_blackpreserve(blackpreserve[0], dev, profile_types[k]);
+        } else {
+            code = gx_default_put_blackpreserve(blackpreserve[k], dev, profile_types[k]);
+        }
+        if (code < 0)
+            return code;
     }
     gsicc_setcoloraccuracy(dev->memory, color_accuracy);
     code = gx_default_put_graytok(devicegraytok, dev);
@@ -2294,6 +2480,12 @@ label:\
     if (code < 0)
         return code;
     code = gx_default_put_blacktext(blacktext, dev);
+    if (code < 0)
+        return code;
+    code = gx_default_put_blackvector(blackvector, dev);
+    if (code < 0)
+        return code;
+    code = gx_default_put_blackthresholds(blackthresholdL, blackthresholdC, dev);
     if (code < 0)
         return code;
     code = gx_default_put_overprint_control(overprint_control, dev);

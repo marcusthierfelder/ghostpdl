@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Device to implement N-up printing */
@@ -342,7 +342,12 @@ copy_and_modify_sub(gs_param_list *plto, gs_param_list *plfrom, int *present)
             code = (code > 0 ? gs_note_error(gs_error_unknownerror) : code);
             break;
         }
-        gs_param_list_set_persistent_keys(plto, key.persistent);
+        /* We used to use 'key.persistent' to determine whether we needed to copy the
+         * key (by setting persistent_keys in the param list to false), but that isn't
+         * correct! We are going to use the heap buffer 'string_key', not the original
+         * key, and since that's on the heap it is NOT persistent....
+         */
+        gs_param_list_set_persistent_keys(plto, false);
         switch (value.type) {
         case gs_param_type_dict:
             coll_type = gs_param_collection_dict_any;
@@ -691,6 +696,23 @@ nup_dev_spec_op(gx_device *dev, int dev_spec_op, void *data, int size)
                 /* Write a 'false' (0) into the param list provided by the caller.	*/
                 if (strcmp(request->Param, "PdfmarkCapable") == 0) {
                     return(param_write_bool(request->list, "PdfmarkCapable", &code));
+                }
+
+                /* The parameter above is a legacy special op used only by the old PostScript-based
+                 * interpreter. By claiming that the device is not capable of pdfmarks this disables
+                 * ALL pdfmarks with the pdfwrite device which means that many features go missing
+                 * including all annotations (eg Link, Stamp, Text, FreeText etc). which is not
+                 * ideal. The new PDF interpreter written in C has finer grained control and uses
+                 * these two parameters to disable CropBox (and other Boxes) being written with a
+                 * pdfmark, and disables Outlines and Dests if the page order is not preserved.
+                 * We may need more of these later.
+                 */
+                code = true;
+                if (strcmp(request->Param, "ModifiesPageSize") == 0) {
+                    return(param_write_bool(request->list, "ModifiesPageSize", &code));
+                }
+                if (strcmp(request->Param, "ModifiesPageOrder") == 0) {
+                    return(param_write_bool(request->list, "ModifiesPageOrder", &code));
                 }
             }
             /* Fall through */

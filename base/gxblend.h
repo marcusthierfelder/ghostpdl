@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* PDF 1.4 blending functions */
@@ -24,11 +24,10 @@
 #include "gxdevcli.h"
 
 #define RAW_DUMP 0
-#define RAW_DUMP_AS_PAM 0
-/* Useful bash fragment to batch convert pams to pngs:
- * for f in *.pam; do g=${f%.*}; echo $g; convert $g.pam $g.png ; done
- * NB: "convert" is imagemagick convert, so may need to be installed.
- */
+/* We now dump as PAMs, not raws. This is because it's much easier
+ * (for me at least) to view them using:
+ *   http://ghostscript.com/~robin/pamview.html
+ * than anything else. */
 
 /* #define DUMP_TO_PNG */
 

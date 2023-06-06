@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -149,7 +149,7 @@ gs_gstate_initialize(gs_gstate * pgs, gs_memory_t * mem)
     pgs->icc_profile_cache = gsicc_profilecache_new(pgs->memory);
     if (pgs->icc_profile_cache == NULL)
         return_error(gs_error_VMerror);
-    pgs->black_text_state = NULL;
+    pgs->black_textvec_state = NULL;
 #if ENABLE_CUSTOM_COLOR_CALLBACK
     pgs->custom_color_callback = INIT_CUSTOM_COLOR_PTR;
 #endif
@@ -179,7 +179,7 @@ gs_gstate_copied(gs_gstate * pgs)
     rc_increment(pgs->icc_link_cache);
     rc_increment(pgs->icc_profile_cache);
     rc_increment(pgs->icc_manager);
-    rc_increment(pgs->black_text_state);
+    rc_increment(pgs->black_textvec_state);
 }
 
 /* Adjust reference counts before assigning one gs_gstate to another. */
@@ -209,7 +209,7 @@ gs_gstate_pre_assign(gs_gstate *pto, const gs_gstate *pfrom)
     RCCOPY(icc_link_cache);
     RCCOPY(icc_profile_cache);
     RCCOPY(icc_manager);
-    RCCOPY(black_text_state);
+    RCCOPY(black_textvec_state);
 #undef RCCOPY
 }
 
@@ -250,6 +250,6 @@ gs_gstate_release(gs_gstate * pgs)
     RCDECR(icc_link_cache);
     RCDECR(icc_profile_cache);
     RCDECR(icc_manager);
-    RCDECR(black_text_state);
+    RCDECR(black_textvec_state);
 #undef RCDECR
 }

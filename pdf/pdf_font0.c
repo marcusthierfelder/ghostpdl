@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Include this first so that we don't get a macro redefnition of 'offsetof' */
@@ -34,39 +34,22 @@
 
 #include "gsutil.h"        /* For gs_next_ids() */
 
-extern const pdfi_cid_decoding_t *pdfi_cid_decoding_list[];
-extern const pdfi_cid_subst_nwp_table_t *pdfi_cid_substnwp_list[];
-
-static void pdfi_font0_cid_subst_tables(const char *reg, const int reglen, const char *ord,
-                const int ordlen, pdfi_cid_decoding_t **decoding, pdfi_cid_subst_nwp_table_t **substnwp)
-{
-    int i;
-    *decoding = NULL;
-    *substnwp = NULL;
-    /* This only makes sense for Adobe orderings */
-    if (reglen == 5 && !memcmp(reg, "Adobe", 5)) {
-        for (i = 0; pdfi_cid_decoding_list[i] != NULL; i++) {
-            if (strlen(pdfi_cid_decoding_list[i]->s_order) == ordlen &&
-                !memcmp(pdfi_cid_decoding_list[i]->s_order, ord, ordlen)) {
-                *decoding = (pdfi_cid_decoding_t *)pdfi_cid_decoding_list[i];
-                break;
-            }
-        }
-        /* For now, also only for Adobe orderings */
-        for (i = 0; pdfi_cid_substnwp_list[i] != NULL; i++) {
-            if (strlen(pdfi_cid_substnwp_list[i]->ordering) == ordlen &&
-                !memcmp(pdfi_cid_substnwp_list[i]->ordering, ord, ordlen)) {
-                *substnwp = (pdfi_cid_subst_nwp_table_t *)pdfi_cid_substnwp_list[i];
-                break;
-            }
-        }
-    }
-}
-
 static int
-pdfi_font0_glyph_name(gs_font *font, gs_glyph index, gs_const_string *pstr)
+pdfi_font0_glyph_name(gs_font *pfont, gs_glyph index, gs_const_string *pstr)
 {
-    return_error(gs_error_rangecheck);
+    int code;
+    pdf_font_type0 *pt0font = (pdf_font_type0 *)pfont->client_data;
+    char gnm[64];
+    pdf_context *ctx = pt0font->ctx;
+    uint gindex = 0;
+
+    gs_snprintf(gnm, 64, "%lu", (long)index);
+    code = (*ctx->get_glyph_index)((gs_font *)pfont, (byte *)gnm, strlen(gnm), &gindex);
+    if (code < 0)
+        return code;
+    code = (*ctx->get_glyph_name)(pfont, (gs_glyph)gindex, (gs_const_string *)pstr);
+
+    return code;
 }
 
 static int
@@ -80,7 +63,7 @@ pdfi_font0_map_glyph_to_unicode(gs_font *font, gs_glyph glyph, int ch, ushort *u
     pdfi_cid_subst_nwp_table_t *substnwp = pt0font->substnwp;
 
     code = pdfi_array_get(pt0font->ctx, pt0font->DescendantFonts, 0, (pdf_obj **)&decfont);
-    if (code < 0 || decfont->type != PDF_FONT) {
+    if (code < 0 || pdfi_type_of(decfont) != PDF_FONT) {
         pdfi_countdown(decfont);
         return gs_error_undefined;
     }
@@ -186,10 +169,19 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
     /* We're supposed to have a FontDescriptor, it can be missing, and we have to carry on */
     (void)pdfi_dict_get(ctx, font_dict, "FontDescriptor", (pdf_obj **)&fontdesc);
 
+    if (fontdesc != NULL) {
+        pdf_obj *Name = NULL;
+
+        code = pdfi_dict_get_type(ctx, (pdf_dict *) fontdesc, "FontName", PDF_NAME, (pdf_obj**)&Name);
+        if (code < 0)
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_FDESC_BAD_FONTNAME, "pdfi_load_font", "");
+        pdfi_countdown(Name);
+    }
+
     code = pdfi_dict_get(ctx, font_dict, "Encoding", &cmap);
     if (code < 0) goto error;
 
-    if (cmap->type == PDF_CMAP) {
+    if (pdfi_type_of(cmap) == PDF_CMAP) {
         pcmap = (pdf_cmap *)cmap;
         cmap = NULL;
     }
@@ -203,7 +195,7 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
     code = pdfi_dict_get(ctx, font_dict, "DescendantFonts", (pdf_obj **)&arr);
     if (code < 0) goto error;
 
-    if (arr->type != PDF_ARRAY || arr->size != 1) {
+    if (pdfi_type_of(arr) != PDF_ARRAY || arr->size != 1) {
         code = gs_note_error(gs_error_invalidfont);
         goto error;
     }
@@ -211,31 +203,32 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
     pdfi_countdown(arr);
     arr = NULL;
     if (code < 0) goto error;
-    if (decfontdict->type == PDF_FONT) {
-        descpfont = (pdf_font *)decfontdict;
-        decfontdict = descpfont->PDF_font;
-        pdfi_countup(decfontdict);
-    }
-    else {
-        if (decfontdict->type != PDF_DICT) {
-            code = gs_note_error(gs_error_invalidfont);
-            goto error;
-        }
-        code = pdfi_dict_get(ctx, (pdf_dict *)decfontdict, "Type", (pdf_obj **)&n);
-        if (code < 0) goto error;
-        if (n->type != PDF_NAME || n->length != 4 || memcmp(n->data, "Font", 4) != 0) {
+    switch (pdfi_type_of(decfontdict)) {
+        case PDF_FONT:
+            descpfont = (pdf_font *)decfontdict;
+            decfontdict = descpfont->PDF_font;
+            pdfi_countup(decfontdict);
+            break;
+        case PDF_DICT:
+            code = pdfi_dict_get(ctx, (pdf_dict *)decfontdict, "Type", (pdf_obj **)&n);
+            if (code < 0) goto error;
+            if (pdfi_type_of(n) != PDF_NAME || n->length != 4 || memcmp(n->data, "Font", 4) != 0) {
+                pdfi_countdown(n);
+                code = gs_note_error(gs_error_invalidfont);
+                goto error;
+            }
             pdfi_countdown(n);
+            break;
+        default:
             code = gs_note_error(gs_error_invalidfont);
             goto error;
-        }
-        pdfi_countdown(n);
     }
 #if 0
     code = pdfi_dict_get(ctx, (pdf_dict *)decfontdict, "Subtype", (pdf_obj **)&n);
     if (code < 0)
         goto error;
 
-    if (n->type != PDF_NAME || n->length != 12 || memcmp(n->data, "CIDFontType", 11) != 0) {
+    if (pdfi_type_of(n) != PDF_NAME || n->length != 12 || memcmp(n->data, "CIDFontType", 11) != 0) {
         pdfi_countdown(n);
         code = gs_note_error(gs_error_invalidfont);
         goto error;
@@ -255,13 +248,13 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
 
     if (ctx->args.ignoretounicode != true) {
         code = pdfi_dict_get(ctx, font_dict, "ToUnicode", (pdf_obj **)&tounicode);
-        if (code >= 0 && tounicode->type == PDF_STREAM) {
+        if (code >= 0 && pdfi_type_of(tounicode) == PDF_STREAM) {
             pdf_cmap *tu = NULL;
             code = pdfi_read_cmap(ctx, tounicode, &tu);
             pdfi_countdown(tounicode);
             tounicode = (pdf_obj *)tu;
         }
-        if (code < 0 || (tounicode != NULL && tounicode->type != PDF_CMAP)) {
+        if (code < 0 || (tounicode != NULL && pdfi_type_of(tounicode) != PDF_CMAP)) {
             pdfi_countdown(tounicode);
             tounicode = NULL;
             code = 0;
@@ -280,6 +273,11 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
         descpfont = (pdf_font *)pf->client_data;
     }
 
+    if (descpfont->pdfi_font_type < e_pdf_cidfont_type0 || descpfont->pdfi_font_type > e_pdf_cidfont_type4) {
+        code = gs_note_error(gs_error_invalidfont);
+        goto error;
+    }
+
     if (descpfont != NULL && ((pdf_cidfont_t *)descpfont)->substitute) {
         pdf_obj *csi = NULL;
         pdf_string *reg = NULL, *ord = NULL;
@@ -290,7 +288,8 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
         if (code >= 0) {
             (void)pdfi_dict_get(ctx, (pdf_dict *)csi, "Registry", (pdf_obj **)&reg);
             (void)pdfi_dict_get(ctx, (pdf_dict *)csi, "Ordering", (pdf_obj **)&ord);
-            if (reg != NULL && ord != NULL) {
+            if (reg != NULL && pdfi_type_of(reg) == PDF_STRING
+             && ord != NULL && pdfi_type_of(ord) == PDF_STRING) {
                 r = (char *)reg->data;
                 rlen = reg->length;
                 o = (char *)ord->data;
@@ -307,11 +306,10 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
             olen = pcmap->csi_ord.size;
         }
         if (rlen > 0 && olen > 0)
-            pdfi_font0_cid_subst_tables(r, rlen, o, olen, &dec, &substnwp);
-        else {
-            dec = NULL;
-            substnwp = NULL;
-        }
+            pdfi_cidfont_cid_subst_tables(r, rlen, o, olen, &dec, &substnwp);
+
+        ((pdf_cidfont_t *)descpfont)->decoding = dec;
+        ((pdf_cidfont_t *)descpfont)->substnwp = substnwp;
     }
     /* reference is now owned by the descendent font created above */
     pdfi_countdown(decfontdict);
@@ -346,6 +344,7 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
     dmprintf2(ctx->memory, "Allocated object of type %c with UID %"PRIi64"\n", pdft0->type, pdft0->UID);
 #endif
     pdft0->refcnt = 1;
+    pdft0->filename = NULL;
     pdft0->object_num = font_dict->object_num;
     pdft0->generation_num = font_dict->generation_num;
     pdft0->indirect_num = font_dict->indirect_num;
@@ -486,12 +485,7 @@ int pdfi_read_type0_font(pdf_context *ctx, pdf_dict *font_dict, pdf_dict *stream
 
     /* object_num can be zero if the dictionary was defined inline */
     if (pdft0->object_num != 0) {
-        code = replace_cache_entry(ctx, (pdf_obj *)pdft0);
-        if (code < 0) {
-            gs_free_object(ctx->memory, pfont0, "pdfi_read_type0_font(pfont0)");
-            code = gs_note_error(gs_error_VMerror);
-            goto error;
-        }
+        (void)replace_cache_entry(ctx, (pdf_obj *)pdft0);
     }
 
     *ppdffont = (pdf_font *)pdft0;
@@ -523,6 +517,8 @@ pdfi_free_font_type0(pdf_obj *font)
     pdfi_countdown(pdft0->Encoding);
     pdfi_countdown(pdft0->DescendantFonts);
     pdfi_countdown(pdft0->ToUnicode);
+    pdfi_countdown(pdft0->filename);
+
     gs_free_object(OBJ_MEMORY(pdft0), pfont0->data.Encoding, "pdfi_free_font_type0(data.Encoding)");
     /* We shouldn't need to free the fonts in the FDepVector, that should happen
         with DescendantFonts above.

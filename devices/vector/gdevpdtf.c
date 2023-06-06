@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -1230,7 +1230,8 @@ pdf_convert_truetype_font(gx_device_pdf *pdev, pdf_resource_t *pres)
                 if (code < 0)
                     return 0;
                 pdfont->u.cidfont.CIDSystemInfo_id = pdev->IdentityCIDSystemInfo_id;
-                gs_sprintf(pdfont0->u.type0.Encoding_name, "%ld 0 R", pdf_resource_id(pdev->OneByteIdentityH));
+                gs_snprintf(pdfont0->u.type0.Encoding_name, sizeof(pdfont0->u.type0.Encoding_name),
+                            "%ld 0 R", pdf_resource_id(pdev->OneByteIdentityH));
                 /* Move ToUnicode : */
                 pdfont0->res_ToUnicode = pdfont->res_ToUnicode; pdfont->res_ToUnicode = 0;
                 pdfont0->cmap_ToUnicode = pdfont->cmap_ToUnicode; pdfont->cmap_ToUnicode = 0;

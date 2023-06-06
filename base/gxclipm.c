@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -77,6 +77,7 @@ mask_clip_initialize_device_procs(gx_device *dev)
     set_dev_proc(dev, copy_alpha_hl_color, mask_clip_copy_alpha_hl_color);
     set_dev_proc(dev, transform_pixel_region, gx_default_transform_pixel_region);
     set_dev_proc(dev, fill_stroke_path, gx_forward_fill_stroke_path);
+    set_dev_proc(dev, lock_pattern, gx_forward_lock_pattern);
 
     /* Ideally these defaults would be set up automatically for us. */
     set_dev_proc(dev, open_device, gx_default_open_device);

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -33,6 +33,7 @@
 #include "gxblend.h"
 #include "gsicc_cache.h"
 #include "gxdevsop.h"
+#include <limits.h>             /* For INT_MAX etc */
 
 #include "gdevp14.h"
 
@@ -99,12 +100,12 @@ tile_fill_init(tile_fill_state_t * ptfs, const gx_device_color * pdevc,
 {
     gx_color_tile *m_tile = pdevc->mask.m_tile;
     int px, py;
-    bool is_planar;
+    int num_planar_planes;
 
     ptfs->pdevc = pdevc;
-    is_planar = dev->is_planar;
-    if (is_planar) {
-        ptfs->num_planes = dev->color_info.num_components;
+    num_planar_planes = dev->num_planar_planes;
+    if (num_planar_planes) {
+        ptfs->num_planes = dev->num_planar_planes;
     } else {
         ptfs->num_planes = -1;
     }
@@ -139,6 +140,45 @@ tile_fill_init(tile_fill_state_t * ptfs, const gx_device_color * pdevc,
     return tile_clip_initialize(ptfs->cdev, ptfs->tmask, dev, px, py);
 }
 
+static int
+threshold_ceil(float f, float e)
+{
+    int i = (int)fastfloor(f);
+
+    if (f - i < e)
+        return i;
+    return i+1;
+}
+static int
+threshold_floor(float f, float e)
+{
+    int i = (int)fastfloor(f);
+
+    if (f - i > 1-e)
+        return i+1;
+    return i;
+}
+
+/* Return a conservative approximation to the maximum expansion caused by
+ * a given matrix. */
+static float
+matrix_expansion(gs_matrix *m)
+{
+    float e, f;
+
+    e = fabs(m->xx);
+    f = fabs(m->xy);
+    if (f > e)
+        e = f;
+    f = fabs(m->yx);
+    if (f > e)
+        e = f;
+    f = fabs(m->yy);
+    if (f > e)
+        e = f;
+
+    return e*e;
+}
 /*
  * Fill with non-standard X and Y stepping.
  * ptile is pdevc->colors.pattern.{m,p}_tile.
@@ -172,6 +212,12 @@ tile_by_steps(tile_fill_state_t * ptfs, int x0, int y0, int w0, int h0,
         double bbw = ptile->bbox.q.x - ptile->bbox.p.x;
         double bbh = ptile->bbox.q.y - ptile->bbox.p.y;
         double u0, v0, u1, v1;
+        /* Any difference smaller than error is guaranteed to result in
+         * less than a pixels difference in the output. Use this as a
+         * threshold when rounding to allow for inaccuracies in
+         * floating point maths. This enables us to avoid doing more
+         * repeats than we need to. */
+        float error = 1/matrix_expansion(&step_matrix);
 
         bbox.p.x = x0, bbox.p.y = y0;
         bbox.q.x = x1, bbox.q.y = y1;
@@ -189,16 +235,16 @@ tile_by_steps(tile_fill_state_t * ptfs, int x0, int y0, int w0, int h0,
          * each pixel of the rectangle being filled with *every* pattern
          * that overlaps it, not just *some* pattern copy.
          */
-        u0 = ibbox.p.x - max(ptile->bbox.p.x, 0) - 0.000001;
-        v0 = ibbox.p.y - max(ptile->bbox.p.y, 0) - 0.000001;
-        u1 = ibbox.q.x - min(ptile->bbox.q.x, 0) + 0.000001;
-        v1 = ibbox.q.y - min(ptile->bbox.q.y, 0) + 0.000001;
+        u0 = ibbox.p.x - max(ptile->bbox.p.x, 0);
+        v0 = ibbox.p.y - max(ptile->bbox.p.y, 0);
+        u1 = ibbox.q.x - min(ptile->bbox.q.x, 0);
+        v1 = ibbox.q.y - min(ptile->bbox.q.y, 0);
         if (!ptile->is_simple)
             u0 -= bbw, v0 -= bbh, u1 += bbw, v1 += bbh;
-        i0 = (int)fastfloor(u0);
-        j0 = (int)fastfloor(v0);
-        i1 = (int)ceil(u1);
-        j1 = (int)ceil(v1);
+        i0 = threshold_floor(u0, error);
+        j0 = threshold_floor(v0, error);
+        i1 = threshold_ceil(u1, error);
+        j1 = threshold_ceil(v1, error);
     }
     if_debug4m('T', mem, "[T]i=(%d,%d) j=(%d,%d)\n", i0, i1, j0, j1);
     for (i = i0; i < i1; i++)
@@ -212,6 +258,10 @@ tile_by_steps(tile_fill_state_t * ptfs, int x0, int y0, int w0, int h0,
             int xoff, yoff;
 
             if_debug4m('T', mem, "[T]i=%d j=%d x,y=(%d,%d)", i, j, x, y);
+            if (x == INT_MIN || y == INT_MIN) {
+                if_debug0m('T', mem, " underflow!\n");
+                continue;
+            }
             if (x < x0)
                 xoff = x0 - x, x = x0, w -= xoff;
             else
@@ -363,8 +413,9 @@ gx_dc_pattern_fill_rectangle(const gx_device_color * pdevc, int x, int y,
     bits = &ptile->tbits;
 
     code = tile_fill_init(&state, pdevc, dev, false);	/* This _may_ allocate state.cdev */
-    if (code < 0)
-        return code;
+    if (code < 0) {
+        goto exit;
+    }
     if (ptile->is_simple && ptile->cdev == NULL) {
         int px =
             imod(-(int)fastfloor(ptile->step_matrix.tx - state.phase.x + 0.5),
@@ -412,6 +463,7 @@ gx_dc_pattern_fill_rectangle(const gx_device_color * pdevc, int x, int y,
                                  &tbits, tile_pattern_clist);
         }
     }
+exit:
     if (CLIPDEV_INSTALLED) {
         tile_clip_free((gx_device_tile_clip *)state.cdev);
         state.cdev = NULL;

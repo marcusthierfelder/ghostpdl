@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -63,7 +63,7 @@ pdf_make_soft_mask_dict(gx_device_pdf * pdev, const gs_pdf14trans_params_t * ppa
         code = pdf_write_function(pdev, pparams->transfer_function, &id);
         if (code < 0)
             return code;
-        gs_sprintf(buf, " %ld 0 R", id);
+        gs_snprintf(buf, sizeof(buf), " %ld 0 R", id);
         code = cos_dict_put_c_key_string(soft_mask_dict, "/TR", (const byte *)buf, strlen(buf));
         if (code < 0)
             return code;
@@ -110,8 +110,12 @@ pdf_make_group_dict(gx_device_pdf * pdev, const gs_pdf14trans_params_t * pparams
     if (pgs != NULL && pparams->group_color_type != UNKNOWN) {
         const gs_color_space *cs = gs_currentcolorspace_inline(pgs);
 
-        code = pdf_color_space_named(pdev, pgs, &cs_value, NULL, cs,
-                &pdf_color_space_names, false, NULL, 0, false);
+        if (pparams->ColorSpace == NULL)
+            code = pdf_color_space_named(pdev, pgs, &cs_value, NULL, cs,
+                    &pdf_color_space_names, false, NULL, 0, false);
+        else
+            code = pdf_color_space_named(pdev, pgs, &cs_value, NULL, pparams->ColorSpace,
+                    &pdf_color_space_names, false, NULL, 0, false);
         if (code < 0)
             return code;
         code = cos_dict_put_c_key(group_dict, "/CS", &cs_value);
@@ -365,7 +369,7 @@ pdf_end_transparency_mask(gs_gstate * pgs, gx_device_pdf * pdev,
             return 0;
         /* We need to update the 'where_used' field, in case we substituted a resource */
         pres->where_used |= pdev->used_mask;
-        gs_sprintf(buf, "%ld 0 R", pdf_resource_id(pres));
+        gs_snprintf(buf, sizeof(buf), "%ld 0 R", pdf_resource_id(pres));
         if (pdev->pres_soft_mask_dict == 0L) {
             /* something went horribly wrong, we have an 'end' wihtout a matching 'begin'
              * Give up, throw an error.

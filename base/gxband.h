@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -52,8 +52,8 @@ typedef struct gx_band_page_info_s {
     char bfname[gp_file_name_sizeof];	/* block file name */
     clist_file_ptr bfile;	/* block file, normally 0 */
     const clist_io_procs_t *io_procs;
-    uint tile_cache_size;	/* size of tile cache */
-    ulong line_ptrs_offset;      /* Offset of line_ptrs within tile cache */
+    size_t tile_cache_size;	/* size of tile cache */
+    size_t line_ptrs_offset;      /* Offset of line_ptrs within tile cache */
     int64_t bfile_end_pos;		/* ftell at end of bfile */
     gx_band_params_t band_params;  /* parameters used when writing band list */
                                 /* (actual values, no 0s) */

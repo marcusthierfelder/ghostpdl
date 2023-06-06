@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -102,6 +102,8 @@ do_call_operator_verbose(op_proc_t op_proc, i_ctx_t *i_ctx_p)
             op_get_name_string(op_proc));
 #endif
     code = do_call_operator(op_proc, i_ctx_p);
+    if (code < 0)
+        if_debug1m('!', imemory, "[!]   error: %d\n", code);
 #if defined(SHOW_STACK_DEPTHS)
     if_debug2m('!', imemory, "[!][es=%d os=%d]\n",
             esp-i_ctx_p->exec_stack.stack.bot,
@@ -1516,6 +1518,20 @@ remap:              if (iesp + 2 >= estop) {
                             /* the pre-check is still valid. */
                             iosp++;
                             ref_assign_inline(iosp, &token);
+                            /* With a construct like /f currentfile def //f we can
+                               end up here with IREF == &token which can go badly wrong,
+                               so find the current file we're interpeting on the estack
+                               and have IREF point to that ref, rather than "token"
+                             */
+                            if (IREF == &token) {
+                                ref *st;
+                                int code2 = z_current_file(i_ctx_p, &st);
+                                if (code2 < 0 || st == NULL) {
+                                    ierror.code = gs_error_Fatal;
+                                    goto rweci;
+                                }
+                                SET_IREF(st);
+                            }
                             goto rt;
                         }
                         store_state(iesp);

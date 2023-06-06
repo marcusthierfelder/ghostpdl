@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,14 +9,15 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Graphics state operations for the PDF interpreter */
 
 #include "pdf_int.h"
 #include "pdf_doc.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_stack.h"
 #include "pdf_dict.h"
@@ -43,6 +44,8 @@
 #include "gscoord.h"        /* For gs_concat() */
 #include "gsutil.h"         /* For gs_next_ids() */
 #include "gscolor3.h"       /* For gs_setsmoothness() */
+#include "gzpath.h"
+#include "gspenum.h"
 
 static const char *blend_mode_names[] = {
     GS_BLEND_MODE_NAMES, 0
@@ -113,7 +116,9 @@ pdfi_gstate_copy_cb(void *to, const void *from)
      */
     if (igs_to != NULL) {
         pdfi_gstate_smask_free(igs_to);
+        pdfi_countdown(igs_to->current_font);
         *(pdfi_int_gstate *) igs_to = *igs_from;
+        pdfi_countup(igs_to->current_font);
         pdfi_gstate_smask_install(igs_to, igs_from->memory, igs_from->SMask, igs_from->GroupGState);
     }
     return 0;
@@ -127,6 +132,7 @@ pdfi_gstate_free_cb(void *old, gs_memory_t * mem, gs_gstate *pgs)
     if (old == NULL)
         return;
     pdfi_gstate_smask_free(igs);
+    pdfi_countdown(igs->current_font);
     /* We need to use the graphics state memory, in case we are running under Ghostscript. */
     gs_free_object(pgs->memory, igs, "pdfi_gstate_free");
 }
@@ -145,6 +151,8 @@ pdfi_gstate_set_client(pdf_context *ctx, gs_gstate *pgs)
 
     /* We need to use the graphics state memory, in case we are running under Ghostscript. */
     igs = pdfi_gstate_alloc_cb(pgs->memory);
+    if (igs == NULL)
+        return_error(gs_error_VMerror);
     igs->ctx = ctx;
     gs_gstate_set_client(pgs, igs, &pdfi_gstate_procs, true /* TODO: client_has_pattern_streams ? */);
     return 0;
@@ -152,8 +160,7 @@ pdfi_gstate_set_client(pdf_context *ctx, gs_gstate *pgs)
 
 int pdfi_concat(pdf_context *ctx)
 {
-    int i, code;
-    pdf_num *num;
+    int code;
     double Values[6];
     gs_matrix m;
 
@@ -165,28 +172,18 @@ int pdfi_concat(pdf_context *ctx)
     if (ctx->text.BlockDepth != 0)
         pdfi_set_warning(ctx, 0, NULL, W_PDF_OPINVALIDINTEXT, "pdfi_concat", NULL);
 
-    for (i=0;i < 6;i++){
-        num = (pdf_num *)ctx->stack_top[i - 6];
-        if (num->type != PDF_INT) {
-            if(num->type != PDF_REAL) {
-                pdfi_pop(ctx, 6);
-                return_error(gs_error_typecheck);
-            }
-            else
-                Values[i] = num->value.d;
-        } else {
-            Values[i] = (double)num->value.i;
-        }
-    }
+    code = pdfi_destack_reals(ctx, Values, 6);
+    if (code < 0)
+        return code;
+
     m.xx = (float)Values[0];
     m.xy = (float)Values[1];
     m.yx = (float)Values[2];
     m.yy = (float)Values[3];
     m.tx = (float)Values[4];
     m.ty = (float)Values[5];
-    code = gs_concat(ctx->pgs, (const gs_matrix *)&m);
-    pdfi_pop(ctx, 6);
-    return code;
+
+    return gs_concat(ctx->pgs, (const gs_matrix *)&m);
 }
 
 int pdfi_op_q(pdf_context *ctx)
@@ -210,7 +207,6 @@ int pdfi_op_q(pdf_context *ctx)
 int pdfi_op_Q(pdf_context *ctx)
 {
     int code = 0;
-    gx_path *ppath = NULL;
 
 #if DEBUG_GSAVE
     dbgmprintf(ctx->memory, "(doing Q)\n"); /* TODO: Spammy, delete me at some point */
@@ -226,205 +222,101 @@ int pdfi_op_Q(pdf_context *ctx)
             return code;
     }
 
-    /* Section 4.4.1 of the 3rd Edition PDF_Refrence Manual, p226 of the 1.7 version
-     * states that the current path is **NOT** part of the graphics state and is not
-     * saved and restored along with the other graphics state parameters. So here
-     * we need to indulge in some ugliness. We take a copy of the current path
-     * before we do a grestore, and below we assign the copy to the graphics state
-     * after the grestore, thus preserving it unchanged. This is still better than
-     * the 'PDF interpreter written in PostScript' method.
-     */
-    ppath = gx_path_alloc_shared(ctx->pgs->path, ctx->memory, "temporary current path copy for Q");
-    if (ppath == NULL)
-        return_error(gs_error_VMerror);
-
-    code = pdfi_grestore(ctx);
-
-    if (code >= 0) {
-        /* Put the path back, and make sure current point is properly set */
-        code = gx_path_assign_preserve(ctx->pgs->path, ppath);
-        if (gx_path_position_valid(ctx->pgs->path))
-            gx_setcurrentpoint_from_path(ctx->pgs, ctx->pgs->path);
-    }
-
-    gx_path_free(ppath, "temporary current path copy for Q");
-
-    return code;
+    return pdfi_grestore(ctx);
 }
 
+/* We want pdfi_grestore() so we can track and warn of "too many Qs"
+ * in the interests of symmetry, we also have pdfi_gsave()
+ */
 int pdfi_gsave(pdf_context *ctx)
 {
-    int code;
-
-    code = gs_gsave(ctx->pgs);
-
-    if(code < 0)
-        return code;
-    else {
-        pdfi_countup_current_font(ctx);
-        return 0;
-    }
+    return gs_gsave(ctx->pgs);
 }
 
 int pdfi_grestore(pdf_context *ctx)
 {
-    int code;
-    pdf_font *font = NULL, *font1 = NULL;
+    int code = 0;
 
     /* Make sure we have encountered as many gsave operations in this
      * stream as grestores. If not, log an error
      */
     if (ctx->pgs->level > ctx->current_stream_save.gsave_level) {
-        font = pdfi_get_current_pdf_font(ctx);
-
         code = gs_grestore(ctx->pgs);
-
-        font1 = pdfi_get_current_pdf_font(ctx);
-        if (font != NULL && (font != font1 || ((pdf_obj *)font)->refcnt > 1)) {
-            /* TODO: This countdown might have been causing memory corruption (dangling pointer)
-             * but seems to be okay now.  Maybe was fixed by other memory issue. 8-28-19
-             * If you come upon this comment in the future and it all seems fine, feel free to
-             * clean this up... (delete comment, remove the commented out warning message, etc)
-             */
-#if REFCNT_DEBUG
-            dbgmprintf2(ctx->memory, "pdfi_grestore() counting down font UID %ld, refcnt %d\n",
-                        font->UID, font->refcnt);
-#endif
-            //            dbgmprintf(ctx->memory, "WARNING pdfi_grestore() DISABLED pdfi_countdown (FIXME!)\n");
-            pdfi_countdown(font);
-        }
-
-        return code;
     } else {
         /* We don't throw an error here, we just ignore it and continue */
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TOOMANYQ, "pdfi_grestore", (char *)"ignoring q");
     }
-    return 0;
+    return code;
 }
 
-/* gs_setgstate is somewhat unpleasant from our point of view, because it replaces
- * the content of the graphics state, without going through our pdfi_gsave/pdfi_grestore
- * functionaltiy. In particular we replace the current font in the graphics state when
- * we call it, and this means we *don't* count down the PDF_font object reference count
- * which leads to an incorrect count and either memory leaks or early freeing.
- * This function *requires* that the calling function will do a pdfi_gsave *before*
- * calling pdfi_setgstate, and a pdfi_grestore *after* calling pdfi_gs_setgstate.
- * it correctly increments/decrements the font reference counts for that condition
- * and no other.
- */
 int pdfi_gs_setgstate(gs_gstate * pgs, const gs_gstate * pfrom)
 {
-    pdf_font *font = NULL;
     int code = 0;
-
-    /* We are going to release a reference to the font from the graphics state
-    * (if there is one) so count it down to keep things straight.
-    */
-    if (pgs->font) {
-        font = (pdf_font *)pgs->font->client_data;
-        if (font)
-            pdfi_countdown(font);
-    }
 
     code = gs_setgstate(pgs, pfrom);
     if (code < 0)
         return code;
 
-    /* The copied gstate may have contained a font, and we expect to do a
-     * pdfi_grestore on exit from here, which will count down the font
-     * so count it up now in preparation.
-     */
-    if (pgs->font) {
-        font = (pdf_font *)pgs->font->client_data;
-        if (font)
-            pdfi_countup(font);
-    }
     return code;
 }
 
 int pdfi_setlinewidth(pdf_context *ctx)
 {
     int code;
-    pdf_num *n1;
     double d1;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
 
-    n1 = (pdf_num *)ctx->stack_top[-1];
-    if (n1->type == PDF_INT){
-        d1 = (double)n1->value.i;
-    } else{
-        if (n1->type == PDF_REAL) {
-            d1 = n1->value.d;
-        } else {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_typecheck);
-        }
-    }
-    code = gs_setlinewidth(ctx->pgs, d1);
-    pdfi_pop(ctx, 1);
-    return code;
+    code = pdfi_destack_real(ctx, &d1);
+    if (code < 0)
+        return code;
+
+    return gs_setlinewidth(ctx->pgs, d1);
 }
 
 int pdfi_setlinejoin(pdf_context *ctx)
 {
     int code;
-    pdf_num *n1;
+    int64_t i;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
 
-    n1 = (pdf_num *)ctx->stack_top[-1];
-    if (n1->type == PDF_INT){
-        code = gs_setlinejoin(ctx->pgs, n1->value.i);
-    } else {
-        pdfi_pop(ctx, 1);
-        return_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    code = pdfi_destack_int(ctx, &i);
+    if (code < 0)
+        return code;
+
+    return gs_setlinejoin(ctx->pgs, (int)i);
 }
 
 int pdfi_setlinecap(pdf_context *ctx)
 {
     int code;
-    pdf_num *n1;
+    int64_t i;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
 
-    n1 = (pdf_num *)ctx->stack_top[-1];
-    if (n1->type == PDF_INT){
-        code = gs_setlinecap(ctx->pgs, n1->value.i);
-    } else {
-        pdfi_pop(ctx, 1);
-        return_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    code = pdfi_destack_int(ctx, &i);
+    if (code < 0)
+        return code;
+
+    return gs_setlinecap(ctx->pgs, i);
 }
 
 int pdfi_setflat(pdf_context *ctx)
 {
     int code;
-    pdf_num *n1;
     double d1;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
 
-    n1 = (pdf_num *)ctx->stack_top[-1];
-    if (n1->type == PDF_INT){
-        d1 = (double)n1->value.i;
-    } else{
-        if (n1->type == PDF_REAL) {
-            d1 = n1->value.d;
-        } else {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_typecheck);
-        }
-    }
+    code = pdfi_destack_real(ctx, &d1);
+    if (code < 0)
+        return code;
+
     /* PDF spec says the value is 1-100, with 0 meaning "use the default"
      * But gs code (and now our code) forces the value to be <= 1
      * This matches what Adobe and evince seem to do (see Bug 555657).
@@ -433,9 +325,7 @@ int pdfi_setflat(pdf_context *ctx)
      */
     if (d1 > 1.0)
         d1 = 1.0;
-    code = gs_setflat(ctx->pgs, d1);
-    pdfi_pop(ctx, 1);
-    return code;
+    return gs_setflat(ctx->pgs, d1);
 }
 
 int pdfi_setdash_impl(pdf_context *ctx, pdf_array *a, double phase_d)
@@ -461,9 +351,9 @@ int pdfi_setdash_impl(pdf_context *ctx, pdf_array *a, double phase_d)
     gs_free_object(ctx->memory, dash_array, "error in setdash");
     return code;
 }
+
 int pdfi_setdash(pdf_context *ctx)
 {
-    pdf_num *phase;
     pdf_array *a;
     double phase_d;
     int code;
@@ -473,52 +363,47 @@ int pdfi_setdash(pdf_context *ctx)
         return_error(gs_error_stackunderflow);
     }
 
-    phase = (pdf_num *)ctx->stack_top[-1];
-    if (phase->type == PDF_INT){
-        phase_d = (double)phase->value.i;
-    } else{
-        if (phase->type == PDF_REAL) {
-            phase_d = phase->value.d;
-        } else {
-            pdfi_pop(ctx, 2);
-            return_error(gs_error_typecheck);
-        }
+    code = pdfi_destack_real(ctx, &phase_d);
+    if (code < 0) {
+        pdfi_pop(ctx, 1);
+        return code;
     }
 
-    a = (pdf_array *)ctx->stack_top[-2];
-    if (a->type != PDF_ARRAY) {
-        pdfi_pop(ctx, 2);
+    a = (pdf_array *)ctx->stack_top[-1];
+    pdfi_countup(a);
+    pdfi_pop(ctx, 1);
+
+    if (pdfi_type_of(a) != PDF_ARRAY) {
+        pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
 
     code = pdfi_setdash_impl(ctx, a, phase_d);
-    pdfi_pop(ctx, 2);
+    pdfi_countdown(a);
     return code;
 }
 
 int pdfi_setmiterlimit(pdf_context *ctx)
 {
     int code;
-    pdf_num *n1;
     double d1;
 
     if (pdfi_count_stack(ctx) < 1)
         return_error(gs_error_stackunderflow);
 
-    n1 = (pdf_num *)ctx->stack_top[-1];
-    if (n1->type == PDF_INT){
-        d1 = (double)n1->value.i;
-    } else{
-        if (n1->type == PDF_REAL) {
-            d1 = n1->value.d;
-        } else {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_typecheck);
-        }
-    }
-    code = gs_setmiterlimit(ctx->pgs, d1);
-    pdfi_pop(ctx, 1);
-    return code;
+    code = pdfi_destack_real(ctx, &d1);
+    if (code < 0)
+        return code;
+
+    /* PostScript (and therefore the graphics library) impose a minimum
+     * value of 1.0 on miter limit. PDF does not specify a minimum, but less
+     * than 1 doesn't make a lot of sense. This code brought over from the old
+     * PDF interpreter which silently clamped the value to 1.
+     */
+    if (d1 < 1.0)
+        d1 = 1.0;
+
+    return gs_setmiterlimit(ctx->pgs, d1);
 }
 
 static int GS_LW(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
@@ -618,38 +503,36 @@ static int GS_RI(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict
 
 static int GS_OP(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_bool *b = NULL;
+    bool b;
     int code;
     bool known=false;
 
-    code = pdfi_dict_get_type(ctx, GS, "OP", PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get_bool(ctx, GS, "OP", &b);
     if (code < 0)
         return code;
 
-    gs_setstrokeoverprint(ctx->pgs, b->value);
+    gs_setstrokeoverprint(ctx->pgs, b);
 
     /* If op not in the dict, then also set it with OP
      * Because that's what gs does pdf_draw.ps/gsparamdict/OP
      */
     code = pdfi_dict_known(ctx, GS, "op", &known);
     if (!known)
-        gs_setfilloverprint(ctx->pgs, b->value);
+        gs_setfilloverprint(ctx->pgs, b);
 
-    pdfi_countdown(b);
     return 0;
 }
 
 static int GS_op(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_bool *b;
+    bool b;
     int code;
 
-    code = pdfi_dict_get_type(ctx, GS, "op", PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get_bool(ctx, GS, "op", &b);
     if (code < 0)
         return code;
 
-    gs_setfilloverprint(ctx->pgs, b->value);
-    pdfi_countdown(b);
+    gs_setfilloverprint(ctx->pgs, b);
     return 0;
 }
 
@@ -701,46 +584,58 @@ static int pdfi_set_blackgeneration(pdf_context *ctx, pdf_obj *obj, pdf_dict *pa
     int code = 0, i;
     gs_function_t *pfn;
 
-    if (obj->type == PDF_NAME) {
-        if (pdfi_name_is((const pdf_name *)obj, "Identity")) {
-            code = gs_setblackgeneration_remap(ctx->pgs, gs_identity_transfer, false);
-            goto exit;
-        } else {
-            if (!is_BG && pdfi_name_is((const pdf_name *)obj, "Default")) {
-                code = gs_setblackgeneration_remap(ctx->pgs, ctx->page.DefaultBG.proc, false);
-                memcpy(ctx->pgs->black_generation->values, ctx->page.DefaultBG.values, transfer_map_size * sizeof(frac));
-                goto exit;
+    switch (pdfi_type_of(obj)) {
+        case PDF_NAME:
+            if (is_BG) {
+                pdfi_set_error(ctx, 0, NULL, E_PDF_BG_ISNAME, "pdfi_set_blackgeneration", "");
+                if (ctx->args.pdfstoponerror)
+                    code = gs_note_error(gs_error_typecheck);
+                else
+                    code = 0;
             } else {
-                code = gs_note_error(gs_error_rangecheck);
-                goto exit;
+                if (pdfi_name_is((const pdf_name *)obj, "Identity"))
+                    code = gs_setblackgeneration_remap(ctx->pgs, gs_identity_transfer, false);
+                else if (pdfi_name_is((const pdf_name *)obj, "Default")) {
+                    code = gs_setblackgeneration_remap(ctx->pgs, ctx->page.DefaultBG.proc, false);
+                    memcpy(ctx->pgs->black_generation->values, ctx->page.DefaultBG.values, transfer_map_size * sizeof(frac));
+                } else
+                    code = gs_note_error(gs_error_rangecheck);
             }
-        }
-    } else {
-        if (obj->type != PDF_DICT && obj->type != PDF_STREAM)
-            return_error(gs_error_typecheck);
+            goto exit;
 
-        code = pdfi_build_function(ctx, &pfn, NULL, 1, obj, page_dict);
-        if (code < 0)
-            return code;
-
-        gs_setblackgeneration_remap(ctx->pgs, gs_mapped_transfer, false);
-        for (i = 0; i < transfer_map_size; i++) {
-            float v, f;
-
-            f = (1.0f / (transfer_map_size - 1)) * i;
-
-            code = gs_function_evaluate(pfn, (const float *)&f, &v);
-            if (code < 0) {
-                pdfi_free_function(ctx, pfn);
+        case PDF_DICT:
+        case PDF_STREAM:
+            code = pdfi_build_function(ctx, &pfn, NULL, 1, obj, page_dict);
+            if (code < 0)
                 return code;
+
+            if (pfn->params.n != 1) {
+                pdfi_free_function(ctx, pfn);
+                return_error(gs_error_rangecheck);
             }
 
-            ctx->pgs->black_generation->values[i] =
-                (v < 0.0 ? float2frac(0.0) :
-                 v >= 1.0 ? frac_1 :
-                 float2frac(v));
-        }
-        code = pdfi_free_function(ctx, pfn);
+            gs_setblackgeneration_remap(ctx->pgs, gs_mapped_transfer, false);
+            for (i = 0; i < transfer_map_size; i++) {
+                float v, f;
+
+                f = (1.0f / (transfer_map_size - 1)) * i;
+
+                code = gs_function_evaluate(pfn, (const float *)&f, &v);
+                if (code < 0) {
+                    pdfi_free_function(ctx, pfn);
+                    return code;
+                }
+
+                ctx->pgs->black_generation->values[i] =
+                    (v < 0.0 ? float2frac(0.0) :
+                     v >= 1.0 ? frac_1 :
+                     float2frac(v));
+            }
+            code = pdfi_free_function(ctx, pfn);
+            break;
+
+        default:
+            return_error(gs_error_typecheck);
     }
 exit:
     return code;
@@ -785,51 +680,65 @@ static int GS_BG2(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dic
     return code;
 }
 
-static int pdfi_set_undercolorremoval(pdf_context *ctx, pdf_obj *obj, pdf_dict *page_dict, bool is_BG)
+static int pdfi_set_undercolorremoval(pdf_context *ctx, pdf_obj *obj, pdf_dict *page_dict, bool is_UCR)
 {
     int code = 0, i;
     gs_function_t *pfn;
 
-    if (obj->type == PDF_NAME) {
-        if (pdfi_name_is((const pdf_name *)obj, "Identity")) {
-            code = gs_setundercolorremoval_remap(ctx->pgs, gs_identity_transfer, false);
-            goto exit;
-        } else {
-            if (!is_BG && pdfi_name_is((const pdf_name *)obj, "Default")) {
-                code = gs_setundercolorremoval_remap(ctx->pgs, ctx->page.DefaultUCR.proc, false);
-                memcpy(ctx->pgs->undercolor_removal->values, ctx->page.DefaultUCR.values, transfer_map_size * sizeof(frac));
-                goto exit;
+    switch (pdfi_type_of(obj)) {
+        case PDF_NAME:
+            if (is_UCR) {
+                pdfi_set_error(ctx, 0, NULL, E_PDF_UCR_ISNAME, "pdfi_set_undercolorremoval", "");
+                if (ctx->args.pdfstoponerror)
+                    code = gs_note_error(gs_error_typecheck);
+                else
+                    code = 0;
             } else {
-                code = gs_note_error(gs_error_rangecheck);
-                goto exit;
+                if (pdfi_name_is((const pdf_name *)obj, "Identity")) {
+                    code = gs_setundercolorremoval_remap(ctx->pgs, gs_identity_transfer, false);
+                } else if (pdfi_name_is((const pdf_name *)obj, "Default")) {
+                    code = gs_setundercolorremoval_remap(ctx->pgs, ctx->page.DefaultUCR.proc, false);
+                    memcpy(ctx->pgs->undercolor_removal->values, ctx->page.DefaultUCR.values, transfer_map_size * sizeof(frac));
+                } else {
+                    code = gs_note_error(gs_error_rangecheck);
+                }
             }
-        }
-    } else {
-        if (obj->type != PDF_DICT && obj->type != PDF_STREAM)
-            return_error(gs_error_typecheck);
+            goto exit;
 
-        code = pdfi_build_function(ctx, &pfn, NULL, 1, obj, page_dict);
-        if (code < 0)
-            return code;
-
-        gs_setundercolorremoval_remap(ctx->pgs, gs_mapped_transfer, false);
-        for (i = 0; i < transfer_map_size; i++) {
-            float v, f;
-
-            f = (1.0f / (transfer_map_size - 1)) * i;
-
-            code = gs_function_evaluate(pfn, (const float *)&f, &v);
-            if (code < 0) {
-                pdfi_free_function(ctx, pfn);
+        case PDF_DICT:
+        case PDF_STREAM:
+            code = pdfi_build_function(ctx, &pfn, NULL, 1, obj, page_dict);
+            if (code < 0)
                 return code;
-            }
 
-            ctx->pgs->undercolor_removal->values[i] =
-                (v < 0.0 ? float2frac(0.0) :
-                 v >= 1.0 ? frac_1 :
-                 float2frac(v));
-        }
-        code = pdfi_free_function(ctx, pfn);
+            if (pfn->params.n == 1) {
+                gs_setundercolorremoval_remap(ctx->pgs, gs_mapped_transfer, false);
+                for (i = 0; i < transfer_map_size; i++) {
+                    float v, f;
+
+                    f = (1.0f / (transfer_map_size - 1)) * i;
+
+                    code = gs_function_evaluate(pfn, (const float *)&f, &v);
+                    if (code < 0) {
+                        pdfi_free_function(ctx, pfn);
+                        return code;
+                    }
+
+                    ctx->pgs->undercolor_removal->values[i] =
+                        (v < 0.0 ? float2frac(0.0) :
+                         v >= 1.0 ? frac_1 :
+                         float2frac(v));
+                }
+                code = pdfi_free_function(ctx, pfn);
+            }
+            else {
+                (void)pdfi_free_function(ctx, pfn);
+                code = gs_note_error(gs_error_rangecheck);
+            }
+            break;
+
+        default:
+            return_error(gs_error_typecheck);
     }
 exit:
     return code;
@@ -901,12 +810,12 @@ static int pdfi_set_all_transfers(pdf_context *ctx, pdf_array *a, pdf_dict *page
         code = pdfi_array_get(ctx, a, (uint64_t)i, &o);
         if (code < 0)
             goto exit;
-        if (o->type == PDF_NAME) {
-            if (pdfi_name_is((const pdf_name *)o, "Identity")) {
-                proc_types[i] = E_IDENTITY;
-                map_procs[i] = gs_identity_transfer;
-            } else {
-                if (!is_TR && pdfi_name_is((const pdf_name *)o, "Default")) {
+        switch (pdfi_type_of(o)) {
+            case PDF_NAME:
+                if (pdfi_name_is((const pdf_name *)o, "Identity")) {
+                    proc_types[i] = E_IDENTITY;
+                    map_procs[i] = gs_identity_transfer;
+                } else if (!is_TR && pdfi_name_is((const pdf_name *)o, "Default")) {
                     proc_types[i] = E_DEFAULT;
                     map_procs[i] = ctx->page.DefaultTransfers[i].proc;
                 } else {
@@ -914,9 +823,9 @@ static int pdfi_set_all_transfers(pdf_context *ctx, pdf_array *a, pdf_dict *page
                     code = gs_note_error(gs_error_typecheck);
                     goto exit;
                 }
-            }
-        } else {
-            if (o->type == PDF_STREAM || o->type == PDF_DICT) {
+                break;
+            case PDF_STREAM:
+            case PDF_DICT:
                 proc_types[i] = E_FUNCTION;
                 map_procs[i] = gs_mapped_transfer;
                 code = pdfi_build_function(ctx, &pfn[i], NULL, 1, o, page_dict);
@@ -924,11 +833,16 @@ static int pdfi_set_all_transfers(pdf_context *ctx, pdf_array *a, pdf_dict *page
                     pdfi_countdown(o);
                     goto exit;
                 }
-            } else {
+                if (pfn[i]->params.m != 1 || pfn[i]->params.n != 1) {
+                    pdfi_countdown(o);
+                    code = gs_note_error(gs_error_rangecheck);
+                    goto exit;
+                }
+                break;
+            default:
                 pdfi_countdown(o);
                 code = gs_note_error(gs_error_typecheck);
                 goto exit;
-            }
         }
         pdfi_countdown(o);
     }
@@ -987,7 +901,6 @@ static int pdfi_set_all_transfers(pdf_context *ctx, pdf_array *a, pdf_dict *page
         }
     }
  exit:
-//    (void)pdfi_seek(ctx, ctx->main_stream, saved_stream_offset, SEEK_SET);
     for (i = 0; i < 4; i++) {
         pdfi_free_function(ctx, pfn[i]);
     }
@@ -999,12 +912,17 @@ static int pdfi_set_gray_transfer(pdf_context *ctx, pdf_obj *tr_obj, pdf_dict *p
     int code = 0, i;
     gs_function_t *pfn;
 
-    if (tr_obj->type != PDF_DICT && tr_obj->type != PDF_STREAM)
+    if (pdfi_type_of(tr_obj) != PDF_DICT && pdfi_type_of(tr_obj) != PDF_STREAM)
         return_error(gs_error_typecheck);
 
     code = pdfi_build_function(ctx, &pfn, NULL, 1, tr_obj, page_dict);
     if (code < 0)
         return code;
+
+    if (pfn->params.m != 1 || pfn->params.n != 1) {
+        (void)pdfi_free_function(ctx, pfn);
+        return_error(gs_error_rangecheck);
+    }
 
     gs_settransfer_remap(ctx->pgs, gs_mapped_transfer, false);
     for (i = 0; i < transfer_map_size; i++) {
@@ -1030,23 +948,32 @@ static int pdfi_set_transfer(pdf_context *ctx, pdf_obj *obj, pdf_dict *page_dict
 {
     int code = 0;
 
-    if (obj->type == PDF_NAME) {
+    if (pdfi_type_of(obj) == PDF_NAME) {
         if (pdfi_name_is((const pdf_name *)obj, "Identity")) {
             code = gs_settransfer_remap(ctx->pgs, gs_identity_transfer, false);
             goto exit;
         } else {
-            if (!is_TR && pdfi_name_is((const pdf_name *)obj, "Default")) {
-                code = gs_settransfer_remap(ctx->pgs, ctx->page.DefaultTransfers[3].proc, false);
-                memcpy(ctx->pgs->set_transfer.gray->values, ctx->page.DefaultTransfers[3].values, transfer_map_size * sizeof(frac));
+            if (is_TR) {
+                pdfi_set_error(ctx, 0, NULL, E_PDF_TR_NAME_NOT_IDENTITY, "pdfi_set_transfer", "");
+                if (ctx->args.pdfstoponerror)
+                    code = gs_note_error(gs_error_rangecheck);
+                else
+                    code = 0;
                 goto exit;
             } else {
-                code = gs_note_error(gs_error_rangecheck);
-                goto exit;
+                if (pdfi_name_is((const pdf_name *)obj, "Default")) {
+                    code = gs_settransfer_remap(ctx->pgs, ctx->page.DefaultTransfers[3].proc, false);
+                    memcpy(ctx->pgs->set_transfer.gray->values, ctx->page.DefaultTransfers[3].values, transfer_map_size * sizeof(frac));
+                    goto exit;
+                } else {
+                    code = gs_note_error(gs_error_rangecheck);
+                    goto exit;
+                }
             }
         }
     }
 
-    if (obj->type == PDF_ARRAY) {
+    if (pdfi_type_of(obj) == PDF_ARRAY) {
         if (pdfi_array_size((pdf_array *)obj) != 4) {
             code = gs_note_error(gs_error_rangecheck);
             goto exit;
@@ -1197,7 +1124,7 @@ error:
 
 static int build_type1_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_dict *page_dict, gx_ht_order *porder, gs_halftone_component *phtc, char *name, int len, int comp_num)
 {
-    int code;
+    int code, i, j;
     pdf_obj *obj = NULL, *transfer = NULL;
     double f, a;
     float values[2] = {0, 0}, domain[4] = {-1, 1, -1, 1}, out;
@@ -1206,6 +1133,7 @@ static int build_type1_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
     gs_screen_enum *penum = NULL;
     gs_point pt;
     gx_transfer_map *pmap = NULL;
+    bool as;
 
     code = pdfi_dict_get_number(ctx, halftone_dict, "Frequency", &f);
     if (code < 0)
@@ -1219,6 +1147,12 @@ static int build_type1_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
     if (code < 0)
         return code;
 
+    code = pdfi_dict_get_bool(ctx, halftone_dict, "AccurateScreens", &as);
+    if (code == gs_error_undefined)
+        as = 0;
+    else if (code < 0)
+        return code;
+
     order = (gx_ht_order *)gs_alloc_bytes(ctx->memory, sizeof(gx_ht_order), "build_type1_halftone");
     if (order == NULL) {
         code = gs_note_error(gs_error_VMerror);
@@ -1226,46 +1160,83 @@ static int build_type1_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
     }
     memset(order, 0x00, sizeof(gx_ht_order));
 
-    if (obj->type == PDF_NAME) {
-        int i;
-
-        if (pdfi_name_is((pdf_name *)obj, "Default")) {
-            i = 0;
-        } else {
-            for (i = 0; i < (sizeof(spot_table) / sizeof (char *)); i++){
-                if (pdfi_name_is((pdf_name *)obj, spot_table[i]))
-                    break;
+    switch (pdfi_type_of(obj)) {
+        case PDF_NAME:
+            if (pdfi_name_is((pdf_name *)obj, "Default")) {
+                i = 0;
+            } else {
+                for (i = 0; i < (sizeof(spot_table) / sizeof (char *)); i++) {
+                    if (pdfi_name_is((pdf_name *)obj, spot_table[i]))
+                        break;
+                }
+                if (i >= (sizeof(spot_table) / sizeof (char *))) {
+                    code = gs_note_error(gs_error_rangecheck);
+                    goto error;
+                }
             }
-            if (i >= (sizeof(spot_table) / sizeof (char *)))
-                return gs_note_error(gs_error_rangecheck);
-        }
-        code = pdfi_build_halftone_function(ctx, &pfn, (byte *)spot_functions[i], strlen(spot_functions[i]));
-        if (code < 0)
-            goto error;
-    } else {
-        if (obj->type == PDF_DICT || obj->type == PDF_STREAM) {
+            code = pdfi_build_halftone_function(ctx, &pfn, (byte *)spot_functions[i], strlen(spot_functions[i]));
+            if (code < 0)
+                goto error;
+            break;
+        case PDF_DICT:
+        case PDF_STREAM:
             code = pdfi_build_function(ctx, &pfn, (const float *)domain, 2, obj, page_dict);
             if (code < 0)
                 goto error;
-        } else {
+            break;
+        case PDF_ARRAY:
+            for (j = 0; j < pdfi_array_size((pdf_array *)obj); j++) {
+                pdf_name *n = NULL;
+
+                code = pdfi_array_get(ctx, (pdf_array *)obj, j, (pdf_obj **)&n);
+                if (code < 0)
+                    goto error;
+                if (pdfi_type_of(n) != PDF_NAME)
+                    pdfi_set_error(ctx, 0, NULL, E_PDF_BAD_TYPE, "build_type1_halftone", "Halftone array element is not a name");
+                else {
+                    for (i = 0; i < (sizeof(spot_table) / sizeof (char *)); i++) {
+                        if (pdfi_name_is((pdf_name *)n, spot_table[i])) {
+                            pdfi_countdown(n);
+                            n = NULL;
+                            code = pdfi_build_halftone_function(ctx, &pfn, (byte *)spot_functions[i], strlen(spot_functions[i]));
+                            if (code < 0)
+                                goto error;
+                            break;
+                        }
+                    }
+                    if (i >= (sizeof(spot_table) / sizeof (char *))) {
+                        pdfi_countdown(n);
+                        n = NULL;
+                    } else
+                        break;
+                }
+                pdfi_countdown(n);
+            }
+            if (j >= pdfi_array_size((pdf_array *)obj)) {
+                code = gs_note_error(gs_error_rangecheck);
+                goto error;
+            }
+            break;
+        default:
             code = gs_note_error(gs_error_typecheck);
             goto error;
-        }
     }
 
     if (pdfi_dict_knownget(ctx, halftone_dict, "TransferFunction", &transfer) > 0) {
-        if (transfer->type == PDF_NAME) {
-            /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
-             * names, if it's not Identity it would be an error (which we would ignore) and if
-             * it is, it has no effect. So what's the point ?
-             */
-        } else {
-            if (transfer->type == PDF_STREAM) {
+        switch (pdfi_type_of(transfer)) {
+            case PDF_NAME:
+                /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
+                 * names, if it's not Identity it would be an error (which we would ignore) and if
+                 * it is, it has no effect. So what's the point ?
+                 */
+                break;
+            case PDF_STREAM:
                 pdfi_evaluate_transfer(ctx, transfer, page_dict, &pmap);
-            } else {
+                break;
+            default:
                 /* should be an error, but we can just ignore it */
                 pdfi_set_warning(ctx, 0, NULL, W_PDF_TYPECHECK, "build_type1_halftone", NULL);
-            }
+                break;
         }
     }
 
@@ -1275,6 +1246,7 @@ static int build_type1_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
     phtc->params.spot.transfer = (code > 0 ? (gs_mapping_proc) 0 : gs_mapped_transfer);
     phtc->params.spot.transfer_closure.proc = 0;
     phtc->params.spot.transfer_closure.data = 0;
+    phtc->params.spot.accurate_screens = as;
     phtc->type = ht_type_spot;
     code = pdfi_get_name_index(ctx, name, len, (unsigned int *)&phtc->cname);
     if (code < 0)
@@ -1344,7 +1316,7 @@ static int build_type6_halftone(pdf_context *ctx, pdf_stream *halftone_stream, p
                                 gx_ht_order *porder, gs_halftone_component *phtc, char *name, int len)
 {
     int code;
-    int64_t w, h, length;
+    int64_t w, h, length = 0;
     gs_threshold2_halftone *ptp = &phtc->params.threshold2;
     pdf_dict *halftone_dict = NULL;
 
@@ -1378,6 +1350,7 @@ static int build_type6_halftone(pdf_context *ctx, pdf_stream *halftone_stream, p
 
     phtc->comp_number = gs_cname_to_colorant_number(ctx->pgs, (byte *)name, len, 1);
 
+    length = w * h;
     code = pdfi_stream_to_buffer(ctx, halftone_stream,
                                  (byte **)&ptp->thresholds.data, &length);
     if (code < 0)
@@ -1401,7 +1374,7 @@ error:
 static int build_type10_halftone(pdf_context *ctx, pdf_stream *halftone_stream, pdf_dict *page_dict, gx_ht_order *porder, gs_halftone_component *phtc, char *name, int len)
 {
     int code;
-    int64_t w, h, length;
+    int64_t w, h, length = 0;
     gs_threshold2_halftone *ptp = &phtc->params.threshold2;
     pdf_dict *halftone_dict = NULL;
 
@@ -1431,6 +1404,7 @@ static int build_type10_halftone(pdf_context *ctx, pdf_stream *halftone_stream, 
 
     phtc->comp_number = gs_cname_to_colorant_number(ctx->pgs, (byte *)name, len, 1);
 
+    length = (w * w) + (h * h);
     code = pdfi_stream_to_buffer(ctx, halftone_stream,
                                  (byte **)&ptp->thresholds.data, &length);
     if (code < 0)
@@ -1454,7 +1428,7 @@ error:
 static int build_type16_halftone(pdf_context *ctx, pdf_stream *halftone_stream, pdf_dict *page_dict, gx_ht_order *porder, gs_halftone_component *phtc, char *name, int len)
 {
     int code;
-    int64_t w, h, length;
+    int64_t w, h, length = 0;
     gs_threshold2_halftone *ptp = &phtc->params.threshold2;
     pdf_dict *halftone_dict = NULL;
 
@@ -1497,6 +1471,12 @@ static int build_type16_halftone(pdf_context *ctx, pdf_stream *halftone_stream, 
         goto error;
 
     phtc->comp_number = gs_cname_to_colorant_number(ctx->pgs, (byte *)name, len, 1);
+
+    if (ptp->width2 != 0 && ptp->height2 != 0) {
+        length = ((ptp->width * ptp->height) + (ptp->width2 * ptp->height2)) * 2;
+    } else {
+        length = (int64_t)ptp->width * (int64_t)ptp->height * 2;
+    }
 
     code = pdfi_stream_to_buffer(ctx, halftone_stream,
                                  (byte **)&ptp->thresholds.data, &length);
@@ -1589,7 +1569,7 @@ static int build_type5_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
      * members.
      */
     do {
-        if (Key->type != PDF_NAME) {
+        if (pdfi_type_of(Key) != PDF_NAME) {
             code = gs_note_error(gs_error_typecheck);
             goto error;
         }
@@ -1662,7 +1642,7 @@ static int build_type5_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
      */
     ix = 1;
     do {
-        if (Key->type != PDF_NAME) {
+        if (pdfi_type_of(Key) != PDF_NAME) {
             code = gs_note_error(gs_error_typecheck);
             goto error;
         }
@@ -1705,7 +1685,7 @@ static int build_type5_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
                                 goto error;
                             break;
                         case 6:
-                            if (Value->type != PDF_STREAM) {
+                            if (pdfi_type_of(Value) != PDF_STREAM) {
                                 code = gs_note_error(gs_error_typecheck);
                                 goto error;
                             }
@@ -1714,7 +1694,7 @@ static int build_type5_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
                                 goto error;
                             break;
                         case 10:
-                            if (Value->type != PDF_STREAM) {
+                            if (pdfi_type_of(Value) != PDF_STREAM) {
                                 code = gs_note_error(gs_error_typecheck);
                                 goto error;
                             }
@@ -1723,7 +1703,7 @@ static int build_type5_halftone(pdf_context *ctx, pdf_dict *halftone_dict, pdf_d
                                 goto error;
                             break;
                         case 16:
-                            if (Value->type != PDF_STREAM) {
+                            if (pdfi_type_of(Value) != PDF_STREAM) {
                                 code = gs_note_error(gs_error_typecheck);
                                 goto error;
                             }
@@ -1881,7 +1861,7 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
             break;
 
         case 6:
-            if (halftone_obj->type != PDF_STREAM)
+            if (pdfi_type_of(halftone_obj) != PDF_STREAM)
                 return_error(gs_error_typecheck);
             phtc = (gs_halftone_component *)gs_alloc_bytes(ctx->memory, sizeof(gs_halftone_component), "pdfi_do_halftone");
             if (phtc == 0) {
@@ -1902,22 +1882,24 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
 
             /* Transfer function pdht->order->transfer */
             if (pdfi_dict_knownget(ctx, ((pdf_stream *)halftone_obj)->stream_dict, "TransferFunction", &transfer) > 0) {
-                if (transfer->type == PDF_NAME) {
-                    /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
-                     * names, if it's not Identity it would be an error (which we would ignore) and if
-                     * it is, it has no effect. So what's the point ?
-                     */
-                } else {
-                    if (transfer->type == PDF_STREAM) {
+                switch (pdfi_type_of(transfer)) {
+                    case PDF_NAME:
+                        /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
+                         * names, if it's not Identity it would be an error (which we would ignore) and if
+                         * it is, it has no effect. So what's the point ?
+                         */
+                        break;
+                    case PDF_STREAM:
                         /* If we get an error here, we can just ignore it, and not apply the transfer */
                         code = pdfi_evaluate_transfer(ctx, transfer, page_dict, &pmap);
                         if (code >= 0) {
                             pdht->order.transfer = pmap;
                         }
-                    } else {
+                        break;
+                    default:
                         /* should be an error, but we can just ignore it */
                         pdfi_set_warning(ctx, 0, NULL, W_PDF_TYPECHECK, "do_halftone", NULL);
-                    }
+                        break;
                 }
                 pdfi_countdown(transfer);
             }
@@ -1933,7 +1915,7 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
             gx_unset_both_dev_colors(ctx->pgs);
             break;
         case 10:
-            if (halftone_obj->type != PDF_STREAM)
+            if (pdfi_type_of(halftone_obj) != PDF_STREAM)
                 return_error(gs_error_typecheck);
             phtc = (gs_halftone_component *)gs_alloc_bytes(ctx->memory, sizeof(gs_halftone_component), "pdfi_do_halftone");
             if (phtc == 0) {
@@ -1954,22 +1936,24 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
 
             /* Transfer function pdht->order->transfer */
             if (pdfi_dict_knownget(ctx, ((pdf_stream *)halftone_obj)->stream_dict, "TransferFunction", &transfer) > 0) {
-                if (transfer->type == PDF_NAME) {
-                    /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
-                     * names, if it's not Identity it would be an error (which we would ignore) and if
-                     * it is, it has no effect. So what's the point ?
-                     */
-                } else {
-                    if (transfer->type == PDF_STREAM) {
+                switch (pdfi_type_of(transfer)) {
+                    case PDF_NAME:
+                        /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
+                         * names, if it's not Identity it would be an error (which we would ignore) and if
+                         * it is, it has no effect. So what's the point ?
+                         */
+                        break;
+                    case PDF_STREAM:
                         /* If we get an error here, we can just ignore it, and not apply the transfer */
                         code = pdfi_evaluate_transfer(ctx, transfer, page_dict, &pmap);
                         if (code >= 0) {
                             pdht->order.transfer = pmap;
                         }
-                    } else {
+                        break;
+                    default:
                         /* should be an error, but we can just ignore it */
                         pdfi_set_warning(ctx, 0, NULL, W_PDF_TYPECHECK, "do_halftone", NULL);
-                    }
+                        break;
                 }
                 pdfi_countdown(transfer);
             }
@@ -1985,7 +1969,7 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
             gx_unset_both_dev_colors(ctx->pgs);
             break;
         case 16:
-            if (halftone_obj->type != PDF_STREAM)
+            if (pdfi_type_of(halftone_obj) != PDF_STREAM)
                 return_error(gs_error_typecheck);
             phtc = (gs_halftone_component *)gs_alloc_bytes(ctx->memory, sizeof(gs_halftone_component), "pdfi_do_halftone");
             if (phtc == 0) {
@@ -2006,22 +1990,24 @@ static int pdfi_do_halftone(pdf_context *ctx, pdf_obj *halftone_obj, pdf_dict *p
 
             /* Transfer function pdht->order->transfer */
             if (pdfi_dict_knownget(ctx, ((pdf_stream *)halftone_obj)->stream_dict, "TransferFunction", &transfer) > 0) {
-                if (transfer->type == PDF_NAME) {
-                    /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
-                     * names, if it's not Identity it would be an error (which we would ignore) and if
-                     * it is, it has no effect. So what's the point ?
-                     */
-                } else {
-                    if (transfer->type == PDF_STREAM) {
+                switch (pdfi_type_of(transfer)) {
+                    case PDF_NAME:
+                        /* As far as I can tell, only /Identity is valid as a name, so we can just ignore
+                         * names, if it's not Identity it would be an error (which we would ignore) and if
+                         * it is, it has no effect. So what's the point ?
+                         */
+                        break;
+                    case PDF_STREAM:
                         /* If we get an error here, we can just ignore it, and not apply the transfer */
                         code = pdfi_evaluate_transfer(ctx, transfer, page_dict, &pmap);
                         if (code >= 0) {
                             pdht->order.transfer = pmap;
                         }
-                    } else {
+                        break;
+                    default:
                         /* should be an error, but we can just ignore it */
                         pdfi_set_warning(ctx, 0, NULL, W_PDF_TYPECHECK, "do_halftone", NULL);
-                    }
+                        break;
                 }
                 pdfi_countdown(transfer);
             }
@@ -2066,7 +2052,7 @@ static int GS_HT(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict
         return code;
 
 
-    if (obj->type == PDF_NAME) {
+    if (pdfi_type_of(obj) == PDF_NAME) {
         if (pdfi_name_is((const pdf_name *)obj, "Default")) {
             goto exit;
         } else {
@@ -2075,6 +2061,10 @@ static int GS_HT(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict
         }
     } else {
         code = pdfi_do_halftone(ctx, obj, page_dict);
+    }
+    if (code < 0 && !ctx->args.pdfstoponerror) {
+        pdfi_set_error(ctx, code, NULL, E_BAD_HALFTONE, "GS_HT", "Halftone will be ignored");
+        code = 0;
     }
 
 exit:
@@ -2110,33 +2100,51 @@ static int GS_SM(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict
 
 static int GS_SA(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_bool *b;
+    bool b;
     int code;
 
-    code = pdfi_dict_get_type(ctx, GS, "SA", PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get_bool(ctx, GS, "SA", &b);
     if (code < 0)
         return code;
 
-    code = gs_setstrokeadjust(ctx->pgs, b->value);
-    pdfi_countdown(b);
-    return 0;
+    return gs_setstrokeadjust(ctx->pgs, b);
 }
 
 static int GS_BM(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
     pdf_name *n;
     int code;
-    gs_blend_mode_t mode;
+    gs_blend_mode_t mode = 0; /* Start with /Normal */
 
-    code = pdfi_dict_get_type(ctx, GS, "BM", PDF_NAME, (pdf_obj **)&n);
+    code = pdfi_dict_get(ctx, GS, "BM", (pdf_obj **)&n);
     if (code < 0)
         return code;
 
-    code = pdfi_get_blend_mode(ctx, n, &mode);
-    pdfi_countdown(n);
-    if (code == 0)
+    if (pdfi_type_of(n) == PDF_ARRAY) {
+        int i;
+        pdf_array *a = (pdf_array *)n;
+
+        for (i=0;i < pdfi_array_size(a);i++){
+            code = pdfi_array_get_type(ctx, a, i, PDF_NAME, (pdf_obj **)&n);
+            if (code < 0)
+                continue;
+            code = pdfi_get_blend_mode(ctx, n, &mode);
+            pdfi_countdown(n);
+            if (code == 0)
+                break;
+        }
+        pdfi_countdown(a);
         return gs_setblendmode(ctx->pgs, mode);
-    return_error(gs_error_undefined);
+    }
+
+    if (pdfi_type_of(n) == PDF_NAME) {
+        code = pdfi_get_blend_mode(ctx, n, &mode);
+        pdfi_countdown(n);
+        if (code == 0)
+            return gs_setblendmode(ctx->pgs, mode);
+        return_error(gs_error_undefined);
+    }
+    return_error(gs_error_typecheck);
 }
 
 static int GS_SMask(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
@@ -2144,7 +2152,7 @@ static int GS_SMask(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_d
     pdf_obj *o = NULL;
     pdfi_int_gstate *igs = (pdfi_int_gstate *)ctx->pgs->client_data;
     int code;
-    pdf_bool *Processed = NULL;
+    bool Processed;
 
     if (ctx->page.has_transparency == false || ctx->args.notransparency == true)
         return 0;
@@ -2153,40 +2161,51 @@ static int GS_SMask(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_d
     if (code < 0)
         return code;
 
-    if (o->type == PDF_NAME) {
-        pdf_name *n = (pdf_name *)o;
+    switch (pdfi_type_of(o)) {
+        case PDF_NAME:
+        {
+            pdf_name *n = (pdf_name *)o;
 
-        if (pdfi_name_is(n, "None")) {
-            if (igs->SMask) {
-                pdfi_gstate_smask_free(igs);
-                code = pdfi_trans_end_smask_notify(ctx);
+            if (pdfi_name_is(n, "None")) {
+                if (igs->SMask) {
+                    pdfi_gstate_smask_free(igs);
+                    code = pdfi_trans_end_smask_notify(ctx);
+                }
+                goto exit;
             }
-            goto exit;
+            code = pdfi_find_resource(ctx, (unsigned char *)"ExtGState", n, stream_dict, page_dict, &o);
+            pdfi_countdown(n);
+            if (code < 0)
+                return code;
+            break;
         }
-        code = pdfi_find_resource(ctx, (unsigned char *)"ExtGState", n, stream_dict, page_dict, &o);
-        pdfi_countdown(n);
-        if (code < 0)
-            return code;
-    }
 
-    if (o->type == PDF_DICT) {
-        code = pdfi_dict_knownget_type(ctx, (pdf_dict *)o, "Processed", PDF_BOOL, (pdf_obj **)&Processed);
-        /* Need to clear the Processed flag in the SMask if another value is set
-         * (even if it's the same SMask?)
-         * TODO: I think there is a better way to do this that doesn't require sticking this
-         * flag in the SMask dictionary.  But for now, let's get correct behavior.
-         */
-        if (code > 0 && Processed->value)
-            Processed->value = false;
-        if (igs->SMask)
-            pdfi_gstate_smask_free(igs);
-        /* We need to use the graphics state memory, in case we are running under Ghostscript. */
-        pdfi_gstate_smask_install(igs, ctx->pgs->memory, (pdf_dict *)o, ctx->pgs);
+        case PDF_DICT:
+        {
+            code = pdfi_dict_knownget_bool(ctx, (pdf_dict *)o, "Processed", &Processed);
+            /* Need to clear the Processed flag in the SMask if another value is set
+             * (even if it's the same SMask?)
+             * TODO: I think there is a better way to do this that doesn't require sticking this
+             * flag in the SMask dictionary.  But for now, let's get correct behavior.
+             */
+            if (code > 0 && Processed) {
+                code = pdfi_dict_put_bool(ctx, (pdf_dict *)o, "Processed", false);
+                if (code < 0)
+                    return code;
+            }
+            if (igs->SMask)
+                pdfi_gstate_smask_free(igs);
+            /* We need to use the graphics state memory, in case we are running under Ghostscript. */
+            pdfi_gstate_smask_install(igs, ctx->pgs->memory, (pdf_dict *)o, ctx->pgs);
+            break;
+        }
+
+        default:
+            break;
     }
 
  exit:
     pdfi_countdown(o);
-    pdfi_countdown(Processed);
     return 0;
 }
 
@@ -2238,30 +2257,26 @@ static int GS_ca(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict
 
 static int GS_AIS(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_bool *b;
+    bool b;
     int code;
 
-    code = pdfi_dict_get_type(ctx, GS, "AIS", PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get_bool(ctx, GS, "AIS", &b);
     if (code < 0)
         return code;
 
-    code = gs_setalphaisshape(ctx->pgs, b->value);
-    pdfi_countdown(b);
-    return 0;
+    return gs_setalphaisshape(ctx->pgs, b);
 }
 
 static int GS_TK(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_bool *b;
+    bool b;
     int code;
 
-    code = pdfi_dict_get_type(ctx, GS, "TK", PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get_bool(ctx, GS, "TK", &b);
     if (code < 0)
         return code;
 
-    code = gs_settextknockout(ctx->pgs, b->value);
-    pdfi_countdown(b);
-    return 0;
+    return gs_settextknockout(ctx->pgs, b);
 }
 
 typedef int (*GS_proc)(pdf_context *ctx, pdf_dict *GS, pdf_dict *stream_dict, pdf_dict *page_dict);
@@ -2325,7 +2340,7 @@ int pdfi_set_ExtGState(pdf_context *ctx, pdf_dict *stream_dict,
 
 int pdfi_setgstate(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
 {
-    pdf_name *n;
+    pdf_name *n = NULL;
     pdf_obj *o = NULL;
     int code=0, code1 = 0;
 
@@ -2338,19 +2353,20 @@ int pdfi_setgstate(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_dict)
         goto setgstate_error;
     }
     n = (pdf_name *)ctx->stack_top[-1];
-    if (n->type != PDF_NAME) {
-        pdfi_pop(ctx, 1);
+    pdfi_countup(n);
+    pdfi_pop(ctx, 1);
+
+    if (pdfi_type_of(n) != PDF_NAME) {
         code = gs_note_error(gs_error_typecheck);
         goto setgstate_error;
     }
 
     code = pdfi_find_resource(ctx, (unsigned char *)"ExtGState", n, (pdf_dict *)stream_dict,
                               page_dict, &o);
-    pdfi_pop(ctx, 1);
     if (code < 0)
         goto setgstate_error;
 
-    if (o->type != PDF_DICT) {
+    if (pdfi_type_of(o) != PDF_DICT) {
         code = gs_note_error(gs_error_typecheck);
         goto setgstate_error;
     }
@@ -2361,6 +2377,7 @@ setgstate_error:
     code1 = pdfi_loop_detector_cleartomark(ctx);
     if (code == 0) code = code1;
 
+    pdfi_countdown(n);
     pdfi_countdown(o);
     return code;
 }

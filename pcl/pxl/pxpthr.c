@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -143,12 +143,12 @@ pxPassthrough_init(px_state_t * pxs)
         stream_cursor_read r;
 
         ret =
-            gs_sprintf(buf,
+            gs_snprintf(buf, sizeof(buf),
                     "@PJL SET PAPERLENGTH = %d\n@PJL SET PAPERWIDTH = %d\n",
                     (int)(pxs->media_dims.y * 10 + .5),
                     (int)(pxs->media_dims.x * 10 + .5));
 
-        /* There is no reason gs_sprintf should fail, but to shut coverity up... */
+        /* There is no reason gs_snprintf should fail, but to shut coverity up... */
         if (ret > 0) {
             stream_cursor_read_init(&r, (const byte *)buf, ret);
             pjl_proc_process(pxs->pjls, &r);

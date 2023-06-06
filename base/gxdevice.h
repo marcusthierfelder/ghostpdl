@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -135,6 +135,7 @@
         0/*Profile Array*/,\
         0/* graphics_type_tag default GS_UNTOUCHED_TAG */,\
         1/* interpolate_control default 1, uses image /Interpolate flag, full device resolution */,\
+        0/*non_strict_bounds - default is to be strict*/,\
         { ins, bp, ep }
 #define std_device_part3_()\
         std_device_part3_sc(gx_default_install, gx_default_begin_page, gx_default_end_page)
@@ -318,6 +319,7 @@ dev_proc_copy_alpha_hl_color(gx_default_copy_alpha_hl_color);
 dev_proc_process_page(gx_default_process_page);
 dev_proc_transform_pixel_region(gx_default_transform_pixel_region);
 dev_proc_fill_stroke_path(gx_default_fill_stroke_path);
+dev_proc_lock_pattern(gx_default_lock_pattern);
 dev_proc_begin_transparency_group(gx_default_begin_transparency_group);
 dev_proc_end_transparency_group(gx_default_end_transparency_group);
 dev_proc_begin_transparency_mask(gx_default_begin_transparency_mask);
@@ -418,6 +420,7 @@ dev_proc_strip_tile_rect_devn(gx_forward_strip_tile_rect_devn);
 dev_proc_copy_alpha_hl_color(gx_forward_copy_alpha_hl_color);
 dev_proc_transform_pixel_region(gx_forward_transform_pixel_region);
 dev_proc_fill_stroke_path(gx_forward_fill_stroke_path);
+dev_proc_lock_pattern(gx_forward_lock_pattern);
 void gx_forward_device_initialize_procs(gx_device *dev);
 
 /* ---------------- Implementation utilities ---------------- */
@@ -665,13 +668,17 @@ int gs_is_pdf14trans_compositor(const gs_composite_t * pct);
 
 #define subclass_common\
     t_dev_proc_composite *saved_compositor_method;\
-    gx_device_forward *forwarding_dev
+    gx_device_forward *forwarding_dev;\
+    gx_device *pre_composite_device;\
+    void (*saved_finalize_method)(gx_device *)
 
 typedef int (t_dev_proc_composite) (gx_device *dev, gx_device **pcdev, const gs_composite_t *pcte, gs_gstate *pgs, gs_memory_t *memory, gx_device *cdev);
 
 typedef struct {
     t_dev_proc_composite *saved_compositor_method;
     gx_device_forward *forwarding_dev;
+    gx_device *pre_composite_device;
+    void (*saved_finalize_method)(gx_device *);
 } generic_subclass_data;
 
 int gx_copy_device_procs(gx_device *dest, const gx_device *src, const gx_device *prototype);

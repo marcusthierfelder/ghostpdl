@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #include "ghostpdf.h"
@@ -57,6 +57,8 @@
 #  include "sjpx.h"
 #endif
 
+extern const uint file_default_buffer_size;
+
 static void pdfi_close_filter_chain(pdf_context *ctx, stream *s, stream *target);
 
 /* Utility routine to create a pdf_c_stream object */
@@ -102,6 +104,9 @@ pdfi_filter_open(uint buffer_size,
         if (sst == NULL)
             return_error(gs_error_VMerror);
     }
+    if (buffer_size < 128)
+        buffer_size = file_default_buffer_size;
+
     code = file_open_stream((char *)0, 0, "r", buffer_size, &s,
                                 (gx_io_device *)0, (iodev_proc_fopen_t)0, mem);
     if (code < 0) {
@@ -329,7 +334,7 @@ static int pdfi_Flate_filter(pdf_context *ctx, pdf_dict *d, stream *source, stre
     (*new_stream)->strm = source;
     source = *new_stream;
 
-    if (d && d->type == PDF_DICT) {
+    if (d && pdfi_type_of(d) == PDF_DICT) {
         Flate_source = (*new_stream)->strm;
         code = pdfi_Predictor_filter(ctx, d, source, new_stream);
         if (code < 0)
@@ -347,7 +352,7 @@ pdfi_JBIG2Decode_filter(pdf_context *ctx, pdf_dict *dict, pdf_dict *decode,
     int code;
     pdf_stream *Globals = NULL;
     byte *buf = NULL;
-    int64_t buflen;
+    int64_t buflen = 0;
     void *globalctx;
 
     s_jbig2decode_set_global_data((stream_state*)&state, NULL, NULL);
@@ -398,7 +403,7 @@ static int pdfi_LZW_filter(pdf_context *ctx, pdf_dict *d, stream *source, stream
     /* s_zlibD_template defined in base/szlibd.c */
     s_LZW_set_defaults_inline(&lzs);
 
-    if (d && d->type == PDF_DICT) {
+    if (d && pdfi_type_of(d) == PDF_DICT) {
         code = pdfi_dict_get_int(ctx, d, "EarlyChange", &i);
         if (code < 0 && code != gs_error_undefined)
             return code;
@@ -416,7 +421,7 @@ static int pdfi_LZW_filter(pdf_context *ctx, pdf_dict *d, stream *source, stream
     (*new_stream)->strm = source;
     source = *new_stream;
 
-    if (d && d->type == PDF_DICT)
+    if (d && pdfi_type_of(d) == PDF_DICT)
         pdfi_Predictor_filter(ctx, d, source, new_stream);
     return 0;
 }
@@ -468,21 +473,25 @@ pdfi_JPX_filter(pdf_context *ctx, pdf_dict *dict, pdf_dict *decode,
     }
     if (dict && pdfi_dict_get(ctx, dict, "ColorSpace", &csobj) == 0) {
         /* parse the value */
-        if (csobj->type == PDF_ARRAY) {
+        switch (pdfi_type_of(csobj)) {
+        case PDF_ARRAY:
             /* assume it's the first array element */
             code = pdfi_array_get(ctx, (pdf_array *)csobj, (uint64_t)0, (pdf_obj **)&csname);
             if (code < 0) {
                 pdfi_countdown(csobj);
                 return code;
             }
-        } else if (csobj->type == PDF_NAME) {
+            break;
+        case PDF_NAME:
             /* use the name directly */
             csname = (pdf_name *)csobj;
             csobj = NULL; /* To keep ref counting straight */
-        } else {
+            break;
+        default:
             dmprintf(ctx->memory, "warning: JPX ColorSpace value is an unhandled type!\n");
+            break;
         }
-        if (csname != NULL && csname->type == PDF_NAME) {
+        if (csname != NULL && pdfi_type_of(csname) == PDF_NAME) {
             /* request raw index values if the colorspace is /Indexed */
             if (pdfi_name_is(csname, "Indexed"))
                 state.colorspace = gs_jpx_cs_indexed;
@@ -608,7 +617,7 @@ static int pdfi_DCT_filter(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *de
         return code;
     }
 
-    if (decode && decode->type == PDF_DICT) {
+    if (decode && pdfi_type_of(decode) == PDF_DICT) {
         /* TODO: Why is this here?  'i' never gets used? */
         code = pdfi_dict_get_int(ctx, decode, "ColorTransform", &i);
         if (code < 0 && code != gs_error_undefined)
@@ -669,7 +678,7 @@ static int pdfi_CCITTFax_filter(pdf_context *ctx, pdf_dict *d, stream *source, s
 
     s_CF_set_defaults_inline(&ss);
 
-    if (d && d->type == PDF_DICT) {
+    if (d && pdfi_type_of(d) == PDF_DICT) {
         code = pdfi_dict_get_int(ctx, d, "K", &i);
         if (code < 0 && code != gs_error_undefined)
             return code;
@@ -906,9 +915,14 @@ int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *stream_obj,
     if (code < 0)
         goto exit;
 
-    code = pdfi_dict_knownget(ctx, stream_dict, "Filter", &Filter);
-    if (code == 0 && inline_image)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. */
+    if (inline_image) {
         code = pdfi_dict_knownget(ctx, stream_dict, "F", &Filter);
+        if (code == 0)
+            code = pdfi_dict_knownget(ctx, stream_dict, "Filter", &Filter);
+    } else
+        code = pdfi_dict_knownget(ctx, stream_dict, "Filter", &Filter);
+
     if (code < 0)
         goto exit;
     if (code == 0) {
@@ -917,15 +931,21 @@ int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *stream_obj,
         goto exit;
     }
 
-    if (Filter->type != PDF_ARRAY && Filter->type != PDF_NAME) {
+    switch (pdfi_type_of(Filter)) {
+    default:
         code = gs_note_error(gs_error_typecheck);
         goto exit;
-    }
-
-    if (Filter->type == PDF_NAME) {
-        code = pdfi_dict_knownget(ctx, stream_dict, "DecodeParms", &decode);
-        if (code == 0 && inline_image)
+    case PDF_NAME:
+        /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. */
+        if (inline_image) {
             code = pdfi_dict_knownget(ctx, stream_dict, "DP", &decode);
+            if (code == 0)
+                code = pdfi_dict_knownget(ctx, stream_dict, "DecodeParms", &decode);
+        } else {
+            code = pdfi_dict_knownget(ctx, stream_dict, "DecodeParms", &decode);
+            if (code == 0)
+                code = pdfi_dict_knownget(ctx, stream_dict, "DP", &decode);
+        }
         if (code < 0)
             goto exit;
 
@@ -935,12 +955,21 @@ int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *stream_obj,
             goto exit;
 
         code = pdfi_alloc_stream(ctx, new_s, source->s, new_stream);
-    } else {
+        break;
+    case PDF_ARRAY:
+    {
         pdf_array *filter_array = (pdf_array *)Filter;
 
-        code = pdfi_dict_knownget_type(ctx, stream_dict, "DecodeParms", PDF_ARRAY, (pdf_obj **)&DecodeParams);
-        if (code == 0 && inline_image)
-            code = pdfi_dict_knownget_type(ctx, stream_dict, "DP", PDF_ARRAY, (pdf_obj **)&DecodeParams);
+        /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. */
+        if (inline_image) {
+            code = pdfi_dict_knownget(ctx, stream_dict, "DP", (pdf_obj **)&DecodeParams);
+            if (code == 0)
+                code = pdfi_dict_knownget(ctx, stream_dict, "DecodeParms", (pdf_obj **)&DecodeParams);
+        } else {
+            code = pdfi_dict_knownget(ctx, stream_dict, "DecodeParms", (pdf_obj **)&DecodeParams);
+            if (code == 0)
+                code = pdfi_dict_knownget(ctx, stream_dict, "DP", &decode);
+        }
         if (code < 0)
             goto exit;
 
@@ -998,10 +1027,14 @@ int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *stream_obj,
                     goto error;
                 }
             }
-            if (decode && decode->type != PDF_NULL && decode->type != PDF_DICT) {
+            if (decode && decode != PDF_NULL_OBJ && pdfi_type_of(decode) != PDF_DICT) {
                 pdfi_countdown(decode);
                 decode = NULL;
                 pdfi_set_warning(ctx, 0, NULL, W_PDF_STREAM_BAD_DECODEPARMS, "pdfi_filter_no_decryption", NULL);
+            }
+            if (decode && decode == PDF_NULL_OBJ) {
+                pdfi_countdown(decode);
+                decode = NULL;
             }
 
             code = pdfi_apply_filter(ctx, stream_dict, (pdf_name *)o,
@@ -1016,6 +1049,7 @@ int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *stream_obj,
             s = new_s;
         }
         code = pdfi_alloc_stream(ctx, s, source->s, new_stream);
+    }
     }
 
  exit:
@@ -1045,6 +1079,9 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source,
     pdf_c_stream *crypt_stream = NULL, *SubFile_stream = NULL;
     pdf_string *StreamKey = NULL;
     pdf_dict *stream_dict = NULL;
+    pdf_obj *FileSpec = NULL;
+    pdf_stream *NewStream = NULL;
+    bool known = false;
 
     *new_stream = NULL;
 
@@ -1052,12 +1089,107 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source,
     if (code < 0)
         goto error;
 
+    /* Horrifyingly, any stream dictionary can contain a file specification, which means that
+     * instead of using the stream from the PDF file we must use an external file.
+     * So much for portability!
+     * Note: We must not do this for inline images as an inline image dictionary can
+     * contain the abbreviation /F for the Filter, and an inline image is never a
+     * separate stream, it is (obviously) contained in the current stream.
+     */
+    if (!inline_image) {
+        code = pdfi_dict_known(ctx, stream_dict, "F", &known);
+        if (code >= 0 && known) {
+            pdf_obj *FS = NULL, *o = NULL;
+            pdf_dict *dict = NULL;
+            stream *gstream = NULL;
+
+            code = pdfi_dict_get(ctx, stream_dict, "F", &FileSpec);
+            if (code < 0)
+                goto error;
+            if (pdfi_type_of(FileSpec) == PDF_DICT) {
+                /* We don't really support FileSpec dictionaries, partly because we
+                 * don't really know which platform to use. If there is a /F string
+                 * then we will use that, just as if we had been given a string in
+                 * the first place.
+                 */
+                code = pdfi_dict_knownget(ctx, (pdf_dict *)FileSpec, "F", &FS);
+                if (code < 0) {
+                    goto error;
+                }
+                pdfi_countdown(FileSpec);
+                FileSpec = FS;
+                FS = NULL;
+            }
+            if (pdfi_type_of(FileSpec) != PDF_STRING) {
+                code = gs_note_error(gs_error_typecheck);
+                goto error;
+            }
+            /* We should now have a string with the filename (or URL). We need
+             * to open the file and create a stream, if that succeeds.
+             */
+            gstream = sfopen((const char *)((pdf_string *)FileSpec)->data, "r", ctx->memory);
+            if (gstream == NULL) {
+                emprintf1(ctx->memory, "Failed to open file %s\n", (const char *)((pdf_string *)FileSpec)->data);
+                code = gs_note_error(gs_error_ioerror);
+                goto error;
+            }
+
+            source = (pdf_c_stream *)gs_alloc_bytes(ctx->memory, sizeof(pdf_c_stream), "external stream");
+            if (source == NULL) {
+                code = gs_note_error(gs_error_VMerror);
+                goto error;
+            }
+            memset(source, 0x00, sizeof(pdf_c_stream));
+            source->s = gstream;
+
+            code = pdfi_object_alloc(ctx, PDF_STREAM, 0, (pdf_obj **)&NewStream);
+            if (code < 0)
+                goto error;
+            pdfi_countup(NewStream);
+            code = pdfi_dict_alloc(ctx, 32, &dict);
+            if (code < 0){
+                pdfi_countdown(NewStream);
+                goto error;
+            }
+            pdfi_countup(dict);
+            NewStream->stream_dict = dict;
+            code = pdfi_dict_get(ctx, stream_dict, "FFilter", &o);
+            if (code >= 0) {
+                code = pdfi_dict_put(ctx, NewStream->stream_dict, "Filter", o);
+                if (code < 0) {
+                    pdfi_countdown(NewStream);
+                    goto error;
+                }
+            }
+            code = pdfi_dict_get(ctx, stream_dict, "FPredictor", &o);
+            if (code >= 0) {
+                code = pdfi_dict_put(ctx, NewStream->stream_dict, "Predictor", o);
+                if (code < 0) {
+                    pdfi_countdown(NewStream);
+                    goto error;
+                }
+            }
+            pdfi_countup(NewStream->stream_dict);
+            NewStream->stream_offset = 0;
+            NewStream->Length = 0;
+            NewStream->length_valid = 0;
+            NewStream->stream_written = 0;
+            NewStream->is_marking = 0;
+            NewStream->parent_obj = NULL;
+            stream_obj = NewStream;
+            stream_dict = NewStream->stream_dict;
+        }
+    }
+
     /* If the file isn't encrypted, don't apply encryption. If this is an inline
      * image then its in a content stream and will already be decrypted, so don't
      * apply decryption again.
      */
     if (ctx->encryption.is_encrypted && !inline_image) {
         int64_t Length;
+
+        if (ctx->encryption.StmF == CRYPT_IDENTITY)
+            return pdfi_filter_no_decryption(ctx, stream_obj, source, new_stream, inline_image);
 
         code = pdfi_dict_get_type(ctx, stream_dict, "StreamKey", PDF_STRING, (pdf_obj **)&StreamKey);
         if (code == gs_error_undefined) {
@@ -1085,7 +1217,7 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source,
          */
         Length = pdfi_stream_length(ctx, stream_obj);
 
-        if (Length <= 0 || ctx->encryption.StrF == CRYPT_IDENTITY) {
+        if (Length <= 0) {
             /* Don't treat as an encrypted stream if Length is 0 */
             pdfi_countdown(StreamKey);
             return pdfi_filter_no_decryption(ctx, stream_obj, source, new_stream, inline_image);
@@ -1097,7 +1229,7 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source,
 
         SubFile_stream->original = source->s;
 
-        switch(ctx->encryption.StrF) {
+        switch(ctx->encryption.StmF) {
             case CRYPT_IDENTITY:
                 /* Can't happen, handled above */
                 break;
@@ -1135,7 +1267,9 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source,
         code = pdfi_filter_no_decryption(ctx, stream_obj, source, new_stream, inline_image);
     }
 error:
+    pdfi_countdown(NewStream);
     pdfi_countdown(StreamKey);
+    pdfi_countdown(FileSpec);
     return code;
 }
 
@@ -1147,7 +1281,7 @@ error:
  * NB! The EODString can't be tracked by the stream code. The caller is responsible for
  * managing the lifetime of this object. It must remain valid until the filter is closed.
  */
-int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, pdf_string *EODString, pdf_c_stream *source, pdf_c_stream **new_stream, bool inline_image)
+int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, const char *EODString, pdf_c_stream *source, pdf_c_stream **new_stream, bool inline_image)
 {
     int code;
     stream_SFD_state state;
@@ -1162,8 +1296,8 @@ int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, pdf_string *
         s_SFD_template.set_defaults((stream_state *)&state);
 
     if (EODString != NULL) {
-        state.eod.data = EODString->data;
-        state.eod.size = EODString->length;
+        state.eod.data = (const byte *)EODString;
+        state.eod.size = strlen(EODString);
     }
 
     if (EODCount > 0)
@@ -1176,6 +1310,12 @@ int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, pdf_string *
         return code;
 
     code = pdfi_alloc_stream(ctx, new_s, source->s, new_stream);
+    if (code < 0) {
+        gs_free_object(ctx->memory->non_gc_memory, new_s->state, "pdfi_apply_SubFileDecode_filter");
+        gs_free_object(ctx->memory->non_gc_memory, new_s->cbuf, "pdfi_apply_SubFileDecode_filter");
+        gs_free_object(ctx->memory->non_gc_memory, new_s, "pdfi_apply_SubFileDecode_filter");
+        return code;
+    }
     new_s->strm = source->s;
     if (source->unread_size != 0) {
         (*new_stream)->unread_size = source->unread_size;
@@ -1360,10 +1500,14 @@ int pdfi_open_memory_stream_from_memory(pdf_context *ctx, unsigned int size, byt
 
 int pdfi_close_memory_stream(pdf_context *ctx, byte *Buffer, pdf_c_stream *source)
 {
-    sclose(source->s);
     gs_free_object(ctx->memory, Buffer, "open memory stream(buffer)");
-    gs_free_object(ctx->memory, source->s, "open memory stream(stream)");
-    gs_free_object(ctx->memory, source, "open memory stream(pdf_stream)");
+    if (source != NULL) {
+        if (source->s != NULL) {
+            sclose(source->s);
+            gs_free_object(ctx->memory, source->s, "open memory stream(stream)");
+        }
+        gs_free_object(ctx->memory, source, "open memory stream(pdf_stream)");
+    }
     return 0;
 }
 
@@ -1391,12 +1535,18 @@ void pdfi_close_file(pdf_context *ctx, pdf_c_stream *s)
 
 int pdfi_seek(pdf_context *ctx, pdf_c_stream *s, gs_offset_t offset, uint32_t origin)
 {
+    int code = 0;
+
     if (origin == SEEK_CUR && s->unread_size != 0)
         offset -= s->unread_size;
 
     s->unread_size = 0;;
 
-    return (sfseek(s->s, offset, origin));
+    code = sfseek(s->s, offset, origin);
+    if (s->eof && code >= 0)
+        s->eof = 0;
+
+    return code;
 }
 
 /* We use 'stell' sometimes to save the position of the underlying file
@@ -1419,24 +1569,57 @@ gs_offset_t pdfi_tell(pdf_c_stream *s)
     return stell(s->s);
 }
 
+int pdfi_unread_byte(pdf_context *ctx, pdf_c_stream *s, char c)
+{
+    if (s->unread_size == UNREAD_BUFFER_SIZE)
+        return_error(gs_error_ioerror);
+
+    s->unget_buffer[s->unread_size++] = c;
+
+    return 0;
+}
+
 int pdfi_unread(pdf_context *ctx, pdf_c_stream *s, byte *Buffer, uint32_t size)
 {
     if (size + s->unread_size > UNREAD_BUFFER_SIZE)
         return_error(gs_error_ioerror);
 
-    if (s->unread_size) {
-        uint32_t index = s->unread_size - 1;
-
-        do {
-            s->unget_buffer[size + index] = s->unget_buffer[index];
-        } while(index--);
+    Buffer += size;
+    while (size) {
+        s->unget_buffer[s->unread_size++] = *--Buffer;
+        size--;
     }
-
-    memcpy(s->unget_buffer, Buffer, size);
-    s->unread_size += size;
 
     return 0;
 }
+
+int pdfi_read_byte(pdf_context *ctx, pdf_c_stream *s)
+{
+    int32_t code;
+
+    if (s->eof && s->unread_size == 0)
+        return EOFC;
+
+    if (s->unread_size)
+        return (byte)s->unget_buffer[--s->unread_size];
+
+    /* TODO the Ghostscript code uses sbufptr(s) to avoid a memcpy
+     * at some point we should modify this code to do so as well.
+     */
+    code = spgetc(s->s);
+    if (code == EOFC) {
+        s->eof = true;
+        return EOFC;
+    } else if (code == gs_error_ioerror) {
+        pdfi_set_error(ctx, code, "sgets", E_PDF_BADSTREAM, "pdfi_read_bytes", NULL);
+        s->eof = true;
+        return EOFC;
+    } else if(code == ERRC) {
+        return ERRC;
+    }
+    return (int)code;
+}
+
 
 int pdfi_read_bytes(pdf_context *ctx, byte *Buffer, uint32_t size, uint32_t count, pdf_c_stream *s)
 {
@@ -1448,38 +1631,32 @@ int pdfi_read_bytes(pdf_context *ctx, byte *Buffer, uint32_t size, uint32_t coun
         return 0;
 
     if (s->unread_size) {
-        if (s->unread_size >= total) {
-            memcpy(Buffer, s->unget_buffer, total);
-            for(i=0;i < s->unread_size - total;i++) {
-                s->unget_buffer[i] = s->unget_buffer[i + total];
-            }
-            s->unread_size -= total;
-            return total;
-        } else {
-            memcpy(Buffer, s->unget_buffer, s->unread_size);
-            total -= s->unread_size;
-            Buffer += s->unread_size;
-            i = s->unread_size;
-            s->unread_size = 0;
-            if (s->eof)
-                return i;
+        i = s->unread_size;
+        if (i >= total)
+            i = total;
+        bytes = i;
+        while (bytes) {
+            *Buffer++ = s->unget_buffer[--s->unread_size];
+            bytes--;
         }
+        total -= i;
+        if (total == 0 || s->eof)
+            return i;
     }
-    if (total) {
-        /* TODO the Ghostscript code uses sbufptr(s) to avoid a memcpy
-         * at some point we should modify this code to do so as well.
-         */
-        code = sgets(s->s, Buffer, total, &bytes);
-        if (code == EOFC) {
-            s->eof = true;
-        } else if (code == gs_error_ioerror) {
-            pdfi_set_error(ctx, code, "sgets", E_PDF_BADSTREAM, "pdfi_read_bytes", NULL);
-            s->eof = true;
-        } else if(code == ERRC) {
-            bytes = ERRC;
-        } else {
-            bytes = bytes + i;
-        }
+
+    /* TODO the Ghostscript code uses sbufptr(s) to avoid a memcpy
+     * at some point we should modify this code to do so as well.
+     */
+    code = sgets(s->s, Buffer, total, &bytes);
+    if (code == EOFC) {
+        s->eof = true;
+    } else if (code == gs_error_ioerror) {
+        pdfi_set_error(ctx, code, "sgets", E_PDF_BADSTREAM, "pdfi_read_bytes", NULL);
+        s->eof = true;
+    } else if(code == ERRC) {
+        bytes = ERRC;
+    } else {
+        bytes = bytes + i;
     }
 
     return bytes;
@@ -1495,9 +1672,7 @@ pdfi_stream_to_buffer(pdf_context *ctx, pdf_stream *stream_obj, byte **buf, int6
 {
     byte *Buffer = NULL;
     int code = 0;
-    int64_t buflen = 0;
-    int bytes;
-    char c;
+    int64_t buflen = 0, read = 0, ToRead = *bufferlen;
     gs_offset_t savedoffset;
     pdf_c_stream *stream;
     bool filtered;
@@ -1522,21 +1697,24 @@ pdfi_stream_to_buffer(pdf_context *ctx, pdf_stream *stream_obj, byte **buf, int6
             goto exit;
     }
 
-    if (filtered || ctx->encryption.is_encrypted) {
-        code = pdfi_filter(ctx, stream_obj, ctx->main_stream, &stream, false);
-        if (code < 0) {
-            goto exit;
+retry:
+    if (ToRead == 0) {
+        if (filtered || ctx->encryption.is_encrypted) {
+            code = pdfi_filter(ctx, stream_obj, ctx->main_stream, &stream, false);
+            if (code < 0) {
+                goto exit;
+            }
+            while (seofp(stream->s) != true && serrorp(stream->s) != true) {
+                s_process_read_buf(stream->s);
+                buflen += sbufavailable(stream->s);
+                (void)sbufskip(stream->s, sbufavailable(stream->s));
+            }
+            pdfi_close_file(ctx, stream);
+        } else {
+            buflen = pdfi_stream_length(ctx, stream_obj);
         }
-        /* Find out how big it is */
-        do {
-            bytes = sfread(&c, 1, 1, stream->s);
-            if (bytes > 0)
-                buflen++;
-        } while (bytes >= 0);
-        pdfi_close_file(ctx, stream);
-    } else {
-        buflen = pdfi_stream_length(ctx, stream_obj);
-    }
+    } else
+        buflen = *bufferlen;
 
     /* Alloc buffer */
     Buffer = gs_alloc_bytes(ctx->memory, buflen, "pdfi_stream_to_buffer (Buffer)");
@@ -1544,30 +1722,67 @@ pdfi_stream_to_buffer(pdf_context *ctx, pdf_stream *stream_obj, byte **buf, int6
         code = gs_note_error(gs_error_VMerror);
         goto exit;
     }
+
     code = pdfi_seek(ctx, ctx->main_stream, pdfi_stream_offset(ctx, stream_obj), SEEK_SET);
-    if (code < 0)
+    if (code < 0) {
+        buflen = 0;
         goto exit;
+    }
     if (filtered || ctx->encryption.is_encrypted) {
         code = pdfi_filter(ctx, stream_obj, ctx->main_stream, &stream, false);
-        sfread(Buffer, 1, buflen, stream->s);
+        if (code < 0)
+            goto exit;
+        read = sfread(Buffer, 1, buflen, stream->s);
+        if (read == ERRC) {
+            /* Error reading the expected number of bytes. If we already calculated the number of
+             * bytes in the loop above, then ignore the error and carry on. If, however, we were
+             * told how many bytes to expect, and failed to read that many, go back and do this
+             * the slow way to determine how many bytes are *really* available.
+             */
+            if(ToRead != 0) {
+                buflen = ToRead = 0;
+                pdfi_close_file(ctx, stream);
+                code = pdfi_seek(ctx, ctx->main_stream, pdfi_stream_offset(ctx, stream_obj), SEEK_SET);
+                if (code < 0)
+                    goto exit;
+                gs_free_object(ctx->memory, Buffer, "pdfi_stream_to_buffer (Buffer)");
+                goto retry;
+            }
+        }
         pdfi_close_file(ctx, stream);
     } else {
-        sfread(Buffer, 1, buflen, ctx->main_stream->s);
+        read = sfread(Buffer, 1, buflen, ctx->main_stream->s);
+        if (read == ERRC) {
+            /* Error reading the expected number of bytes. If we already calculated the number of
+             * bytes in the loop above, then ignore the error and carry on. If, however, we were
+             * told how many bytes to expect, and failed to read that many, go back and do this
+             * the slow way to determine how many bytes are *really* available.
+             */
+            if(ToRead != 0) {
+                buflen = ToRead = 0;
+                code = pdfi_seek(ctx, ctx->main_stream, pdfi_stream_offset(ctx, stream_obj), SEEK_SET);
+                if (code < 0)
+                    goto exit;
+                gs_free_object(ctx->memory, Buffer, "pdfi_stream_to_buffer (Buffer)");
+                goto retry;
+            }
+        }
     }
 
  exit:
     pdfi_seek(ctx, ctx->main_stream, savedoffset, SEEK_SET);
     if (Buffer && code < 0)
         gs_free_object(ctx->memory, Buffer, "pdfi_stream_to_buffer (Buffer)");
-    *buf = Buffer;
+    else
+        *buf = Buffer;
     *bufferlen = buflen;
     return code;
 }
 
-int pdfi_open_resource_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
+static int pdfi_open_resource_file_inner(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
 {
     int code = 0;
-    if (fname == NULL || fnamelen == 0)
+    if (fname == NULL || fnamelen == 0 || fnamelen >= gp_file_name_sizeof)
         *s = NULL;
     else if (gp_file_name_is_absolute(fname, fnamelen) || fname[0] == '%') {
         /* If it's an absolute path or an explicit PS style device, just try to open it */
@@ -1631,13 +1846,28 @@ retry:
     return 0;
 }
 
-int pdfi_open_font_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
+int pdfi_open_resource_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
+{
+    return pdfi_open_resource_file_inner(ctx, fname, fnamelen, s);
+}
+
+bool pdfi_resource_file_exists(pdf_context *ctx, const char *fname, const int fnamelen)
+{
+    stream *s = NULL;
+    int code = pdfi_open_resource_file_inner(ctx, fname, fnamelen, &s);
+    if (s)
+        sclose(s);
+
+    return (code >= 0);
+}
+
+static int pdfi_open_font_file_inner(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
 {
     int code = 0;
     const char *fontdirstr = "Font/";
     const int fontdirstrlen = strlen(fontdirstr);
 
-    if (fname == NULL || fnamelen == 0)
+    if (fname == NULL || fnamelen == 0 || fnamelen >= (gp_file_name_sizeof - fontdirstrlen))
         *s = NULL;
     else if (gp_file_name_is_absolute(fname, fnamelen) || fname[0] == '%') {
         /* If it's an absolute path or an explicit PS style device, just try to open it */
@@ -1695,7 +1925,22 @@ int pdfi_open_font_file(pdf_context *ctx, const char *fname, const int fnamelen,
         }
     }
     if (*s == NULL)
-        return pdfi_open_resource_file(ctx, fname, fnamelen, s);
+        return pdfi_open_resource_file_inner(ctx, fname, fnamelen, s);
 
     return 0;
+}
+
+int pdfi_open_font_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s)
+{
+    return pdfi_open_font_file_inner(ctx, fname, fnamelen, s);
+}
+
+bool pdfi_font_file_exists(pdf_context *ctx, const char *fname, const int fnamelen)
+{
+    stream *s = NULL;
+    int code = pdfi_open_font_file_inner(ctx, fname, fnamelen, &s);
+    if (s)
+        sclose(s);
+
+    return (code >= 0);
 }

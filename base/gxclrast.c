@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -223,6 +223,13 @@ cmd_read_data(command_buf_t *pcb, byte *ptr, uint rsize, const byte *cbp)
 
         memmove(ptr, cbp, cleft);
         sgets(pcb->s, ptr + cleft, rleft, &rleft);
+#ifdef DEBUG
+        {
+            stream_state *st = pcb->s->state;
+
+            adjust_offset_map_for_skipped_data(st, (uint)(pcb->end - pcb->data), rleft);
+        }
+#endif
         return pcb->end;
     }
 }
@@ -482,6 +489,24 @@ read_set_misc_map(byte cb, command_buf_t *pcb, gs_gstate *pgs, gs_memory_t *mem)
     return 0;
 }
 
+#ifdef DEBUG
+void clist_debug_op(gs_memory_t *mem, const unsigned char *cbp)
+{
+    unsigned char op = *cbp++;
+    const char *const *sub = cmd_sub_op_names[op >> 4];
+    if (op == cmd_opv_extend) {
+        unsigned char op2 = *cbp;
+        if (cmd_extend_op_names[op2])
+            dmlprintf1(mem, " %s", cmd_extend_op_names[op2]);
+        else
+            dmlprintf1(mem, " ?0x%02x?", (int)op2);
+    } else if (sub)
+        dmlprintf1(mem, " %s", sub[op & 0xf]);
+    else
+        dmlprintf2(mem, " %s %d", cmd_op_names[op >> 4], op & 0xf);
+}
+#endif
+
 int
 clist_playback_band(clist_playback_action playback_action, /* lgtm [cpp/use-of-goto] */
                     gx_device_clist_reader *cdev, stream *s,
@@ -634,8 +659,10 @@ in:                             /* Initialize for a new page. */
         goto out;
     }
     code = pcs->type->install_cspace(pcs, &gs_gstate);
-    if (code < 0)
+    if (code < 0) {
+        rc_decrement(pcs, "clist_playback_band");
         goto out;
+    }
     gs_gstate.color[0].color_space = pcs; /* we already have one ref */
     gs_gstate.color[1].color_space = pcs;
     rc_increment_cs(pcs); /* increment for second ref */
@@ -720,20 +747,10 @@ in:                             /* Initialize for a new page. */
         op = *cbp++;
 #ifdef DEBUG
         if (gs_debug_c('L')) {
-            const char *const *sub = cmd_sub_op_names[op >> 4];
-            long offset = (long)clist_file_offset(st, cbp - 1 - cbuf.data);
+            int64_t offset = clist_file_offset(st, cbp - 1 - cbuf.data);
 
-            dmlprintf1(mem, "[L] %ld: ", offset);
-            if (op == cmd_opv_extend) {
-                unsigned char op2 = *cbp;
-                if (cmd_extend_op_names[op2])
-                    dmlprintf1(mem, "%s", cmd_extend_op_names[op2]);
-                else
-                    dmlprintf1(mem, "?0x%02x?", (int)op2);
-            } else if (sub)
-                dmlprintf1(mem, "%s", sub[op & 0xf]);
-            else
-                dmlprintf2(mem, "%s %d", cmd_op_names[op >> 4], op & 0xf);
+            dmlprintf1(mem, "[L] %"PRIu64":", offset);
+            clist_debug_op(mem, cbp-1);
         }
 #endif
         switch (op >> 4) {
@@ -792,18 +809,22 @@ in:                             /* Initialize for a new page. */
                             goto out;
                         goto stp;
                     case cmd_opv_set_bits:
+do_opv_set_bits:
                         compress = *cbp & 3;
-                        bits.cb_depth = *cbp++ >> 2;
+                        bits.head.depth = *cbp++ >> 2;
                         cmd_getw(bits.width, cbp);
                         cmd_getw(bits.height, cbp);
-                        if_debug4m('L', mem, " compress=%d depth=%d size=(%d,%d)",
-                                   compress, bits.cb_depth,
-                                   bits.width, bits.height);
-                        bits.cb_raster =
-                            bitmap_raster(bits.width * bits.cb_depth);
+                        if (op == cmd_opv_set_bits_planar)
+                            cmd_getw(bits.num_planes, cbp);
+                        else
+                            bits.num_planes = 1;
+                        if_debug5m('L', mem, " compress=%d depth=%d size=(%d,%d) planes=%d",
+                                   compress, bits.head.depth,
+                                   bits.width, bits.height, bits.num_planes);
+                        bits.raster =
+                            bitmap_raster(bits.width * bits.head.depth);
                         bits.x_reps = bits.y_reps = 1;
                         bits.shift = bits.rep_shift = 0;
-                        bits.num_planes = 1;
                         goto stb;
                     case cmd_opv_set_tile_color:
                         set_colors = state.tile_colors;
@@ -1061,12 +1082,12 @@ in:                             /* Initialize for a new page. */
                         goto out;
                     }
 #endif
-                    depth = state_slot->cb_depth;
+                    depth = state_slot->head.depth;
                     state.rect.width = state_slot->width;
                     state.rect.height = state_slot->height;
                     if (state.rect.y + state.rect.height > cdev->height)
                         state.rect.height = cdev->height - state.rect.y;	/* clamp as writer did */
-                    raster = state_slot->cb_raster;
+                    raster = state_slot->raster;
                     source = (byte *) (state_slot + 1);
                 } else {        /* Read width, height, bits. */
                     /* depth was set already. */
@@ -1125,6 +1146,8 @@ in:                             /* Initialize for a new page. */
                             cbp = cmd_read_data(&cbuf, plane_bits, 1, cbp);
                             if (width_bytes > 0 && state.rect.height > 0)
                                 memset(plane_bits+1, *plane_bits, width_bytes * state.rect.height - 1);
+                            if (pln == 0)
+                                source = data_bits;
 
                         } else if (compression) {       /* Decompress the image data. */
                             stream_cursor_read r;
@@ -1215,7 +1238,7 @@ in:                             /* Initialize for a new page. */
                 state_tile.data = (byte *) (state_slot + 1);
               stp:state_tile.size.x = state_slot->width;
                 state_tile.size.y = state_slot->height;
-                state_tile.raster = state_slot->cb_raster;
+                state_tile.raster = state_slot->raster;
                 state_tile.rep_width = state_tile.size.x /
                     state_slot->x_reps;
                 state_tile.rep_height = state_tile.size.y /
@@ -1247,6 +1270,8 @@ set_tile_phase:
                 continue;
             case cmd_op_misc2 >> 4:
                 switch (op) {
+                    case cmd_opv_set_bits_planar:
+                        goto do_opv_set_bits;
                     case cmd_opv_set_fill_adjust:
                         cmd_get_value(gs_gstate.fill_adjust.x, cbp);
                         cmd_get_value(gs_gstate.fill_adjust.y, cbp);
@@ -1485,7 +1510,7 @@ ibegin:                 if_debug0m('L', mem, "\n");
                                         if (code < 0)
                                             goto top_up_failed;
                                     }
-                                    cmd_getw(planes[plane].raster, cbp)                                ;
+                                    cmd_getw(planes[plane].raster, cbp);
                                     if ((raster1 = planes[plane].raster) != 0)
                                         cmd_getw(data_x, cbp);
                                 } else {
@@ -1643,6 +1668,15 @@ idata:                  data_size = 0;
                                         if (code < 0)
                                             goto out;
                                     }
+#ifdef DEBUG
+                                    if (gs_debug_c('L')) {
+                                       long offset = (long)clist_file_offset(st, cbp - cbuf.data);
+
+                                       dmlprintf1(mem, "[L]  %ld:", offset);
+                                       clist_debug_op(mem, cbp);
+                                       dmlprintf(mem, "\n");
+                                    }
+#endif
                                     if (cbp[0] == cmd_opv_extend && cbp[1] == cmd_opv_ext_composite) {
                                         gs_composite_t *pcomp, *pcomp_opening;
                                         gs_compositor_closing_state closing_state;
@@ -1982,14 +2016,26 @@ idata:                  data_size = 0;
                 }
                 continue;
             case cmd_op_path >> 4:
-                {
+                if (op == cmd_opv_rgapto)
+                    goto rgapto;
+                else if (op == cmd_opv_lock_pattern) {
+                    gs_id id;
+                    int lock = *cbp++;
+                    cmd_get_value(id, cbp);
+                    if_debug2m('L', mem, "id=0x%lx, lock=%d\n", id, lock);
+                    /* We currently lock the pattern in all the bands, even in ones
+                     * where we haven't used the pattern. This can cause the following
+                     * call to return with 'undefined' because the pattern is not
+                     * found. Just swallow this error and continue. */
+                    code = gx_pattern_cache_entry_set_lock(&gs_gstate, id, lock);
+                    if (code == gs_error_undefined)
+                        code = 0;
+                    if (code < 0)
+                        goto out;
+                    continue;
+                } else {
                     gx_path fpath;
-                    gx_path *ppath;
-
-                    if (op == cmd_opv_rgapto)
-                        goto rgapto;
-
-                    ppath = &path;
+                    gx_path *ppath = &path;
 
                     if_debug0m('L', mem, "\n");
                     /* if in clip, flatten path first */
@@ -2027,26 +2073,6 @@ idata:                  data_size = 0;
                             code = (*dev_proc(tdev, fill_stroke_path))(tdev, &gs_gstate, ppath,
                                                                 &fill_params, &fill_color,
                                                                 &stroke_params, &stroke_color, pcpath);
-                            /* if the color is a pattern, it may have had the "is_locked" flag set	*/
-                            /* clear those now (see do_fill_stroke).					*/
-                            if (gx_dc_is_pattern1_color(&stroke_color)) {
-                                if (stroke_color.colors.pattern.p_tile != NULL) {
-                                    gs_id id = stroke_color.colors.pattern.p_tile->id;
-
-                                    code = gx_pattern_cache_entry_set_lock(&gs_gstate, id, false);
-                                    if (code < 0)
-                                        return code;	/* unlock failed -- should not happen */
-                                }
-                            }
-                            if (gx_dc_is_pattern1_color(&fill_color)) {
-                                if (fill_color.colors.pattern.p_tile != NULL) {
-                                    gs_id id = fill_color.colors.pattern.p_tile->id;
-
-                                    code = gx_pattern_cache_entry_set_lock(&gs_gstate, id, false);
-                                    if (code < 0)
-                                        return code;	/* unlock failed -- should not happen */
-                                }
-                            }
                             break;
                         case cmd_opv_stroke:
                             stroke_params.flatness = gs_gstate.flatness;
@@ -2463,7 +2489,7 @@ read_set_tile_size(command_buf_t *pcb, tile_slot *bits, bool for_pattern)
     uint pdepth;
     byte bd = *cbp++;
 
-    bits->cb_depth = cmd_code_to_depth(bd);
+    bits->head.depth = cmd_code_to_depth(bd);
     if (for_pattern)
         cmd_getw(bits->id, cbp);
     cmd_getw(rep_width, cbp);
@@ -2491,16 +2517,16 @@ read_set_tile_size(command_buf_t *pcb, tile_slot *bits, bool for_pattern)
     else
         bits->num_planes = 1;
     if_debug7('L', " depth=%d size=(%d,%d), rep_size=(%d,%d), rep_shift=%d, num_planes=%d\n",
-              bits->cb_depth, bits->width,
+              bits->head.depth, bits->width,
               bits->height, rep_width,
               rep_height, bits->rep_shift, bits->num_planes);
     bits->shift =
         (bits->rep_shift == 0 ? 0 :
          (bits->rep_shift * (bits->height / rep_height)) % rep_width);
-    pdepth = bits->cb_depth;
+    pdepth = bits->head.depth;
     if (bits->num_planes != 1)
         pdepth /= bits->num_planes;
-    bits->cb_raster = bitmap_raster(bits->width * pdepth);
+    bits->raster = bitmap_raster(bits->width * pdepth);
     pcb->ptr = cbp;
     return 0;
 }
@@ -2521,7 +2547,7 @@ read_set_bits(command_buf_t *pcb, tile_slot *bits, int compress,
     uint bytes;
     byte *data;
     tile_slot *slot;
-    uint depth = bits->cb_depth;
+    uint depth = bits->head.depth;
 
     if (bits->num_planes != 1)
         depth /= bits->num_planes;
@@ -2603,26 +2629,26 @@ read_set_bits(command_buf_t *pcb, tile_slot *bits, int compress,
             return_error(gs_error_unregistered);
         }
         cbp = r.ptr + 1;
-    } else if (rep_height * bits->num_planes > 1 && width_bytes != bits->cb_raster) {
+    } else if (rep_height * bits->num_planes > 1 && width_bytes != bits->raster) {
         cbp = cmd_read_short_bits(pcb, data, bytes,
                                   width_bytes, rep_height * bits->num_planes,
-                                  bits->cb_raster, cbp);
+                                  bits->raster, cbp);
     } else {
         cbp = cmd_read_data(pcb, data, bytes, cbp);
     }
     if (bits->width > rep_width)
         bits_replicate_horizontally(data,
                                     rep_width * depth, rep_height * bits->num_planes,
-                                    bits->cb_raster,
+                                    bits->raster,
                                     bits->width * depth,
-                                    bits->cb_raster);
+                                    bits->raster);
     if (bits->height > rep_height)
         bits_replicate_vertically(data,
-                                  rep_height, bits->cb_raster,
+                                  rep_height, bits->raster,
                                   bits->height);
 #ifdef DEBUG
     if (gs_debug_c('L'))
-        cmd_print_bits(mem, data, bits->width, bits->height, bits->cb_raster);
+        cmd_print_bits(mem, data, bits->width, bits->height, bits->raster);
 #endif
     pcb->ptr = cbp;
     return 0;
@@ -2938,6 +2964,7 @@ read_begin_image(command_buf_t *pcb, gs_image_common_t *pic,
     sread_string(&s, pcb->ptr, pcb->end - pcb->ptr);
     code = image_type->sget(pic, &s, pcs);
     pcb->ptr = sbufptr(&s);
+    pic->imagematrices_are_untrustworthy = 0;
     return code;
 }
 
@@ -3075,7 +3102,7 @@ static int apply_composite(gx_device_clist_reader *cdev, gs_gstate *pgs,
 
     code = pcomp->type->procs.adjust_ctm(pcomp, x0, y0, pgs);
     if (code < 0)
-        return code;
+        goto exit;
     /*
      * Apply the compositor to the target device; note that this may
      * change the target device.
@@ -3088,14 +3115,12 @@ static int apply_composite(gx_device_clist_reader *cdev, gs_gstate *pgs,
         code = 0;
     }
     if (code < 0)
-        return code;
+        goto exit;
 
     /* Perform any updates for the clist device required */
     code = pcomp->type->procs.clist_compositor_read_update(pcomp,
                                         (gx_device *)cdev, tdev, pgs, mem);
-    if (code < 0)
-        return code;
-
+exit:
     /* free the compositor object */
     gs_free_object(mem, pcomp, "read_composite");
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -295,6 +295,7 @@ init_patch_fill_state(patch_fill_state_t *pfs)
     pfs->color_stack = NULL;
     pfs->color_stack_limit = NULL;
     pfs->unlinear = !is_linear_color_applicable(pfs);
+    pfs->pcic = NULL;
     return alloc_patch_fill_memory(pfs, pfs->pgs->memory, pcs);
 }
 
@@ -4212,7 +4213,7 @@ patch_fill(patch_fill_state_t *pfs, const patch_curve_t curve[4],
         if (code < 0)
             goto out;
     }
-    /* How many subdividions of the patch in the u and v direction? */
+    /* How many subdivisions of the patch in the u and v direction? */
     kv[0] = curve_samples(pfs, &p.pole[0][0], 4, pfs->fixed_flat);
     kv[1] = curve_samples(pfs, &p.pole[0][1], 4, pfs->fixed_flat);
     kv[2] = curve_samples(pfs, &p.pole[0][2], 4, pfs->fixed_flat);

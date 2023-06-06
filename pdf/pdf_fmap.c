@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 /* Font re-mapping */
 
@@ -41,16 +41,7 @@ pdfi_custom_fmap_entry pdfi_custom_fmap_entries[] =
 
 static inline bool pdfi_fmap_file_exists(pdf_context *ctx, pdf_string *fname)
 {
-    char nm[gp_file_name_sizeof];
-    struct stat buf;
-    int code = gs_error_invalidfileaccess;
-
-    if (fname->length < gp_file_name_sizeof) {
-        memcpy(nm, fname->data, fname->length);
-        nm[fname->length] = '\0';
-        code = gp_stat(ctx->memory, (const char *)nm, &buf);
-    }
-    return code >= 0;
+    return pdfi_font_file_exists(ctx, (const char *)fname->data, fname->length);
 }
 
 static int
@@ -148,7 +139,11 @@ pdf_make_fontmap(pdf_context *ctx, const char *default_fmapname, int cidfmap)
                     ctx->main_stream = &fakemainstream;
                 }
 
-                code = pdfi_interpret_content_stream(ctx, fmapstr, &fakedict, NULL);
+                if (fmapbuflen > 0)
+                    code = pdfi_interpret_content_stream(ctx, fmapstr, &fakedict, NULL);
+                else
+                    code = 0;
+
                 if (ctx->main_stream == &fakemainstream) {
                     ctx->main_stream = NULL;
                 }
@@ -159,7 +154,7 @@ pdf_make_fontmap(pdf_context *ctx, const char *default_fmapname, int cidfmap)
     } while(j < ctx->num_fontmapfiles && cidfmap == false && code >= 0);
 
     if (code >= 0) {
-        if (code >= 0 && pdfi_count_stack(ctx) > stacksize) {
+        if (pdfi_count_stack(ctx) > stacksize) {
             code = pdfi_dict_from_stack(ctx, 0, 0, true);
             if (code < 0)
                 goto done;
@@ -673,14 +668,18 @@ static int pdfi_generate_native_fontmap(pdf_context *ctx)
                 continue;
 
             sf = sfopen(result, "r", ctx->memory);
+            if (sf == NULL)
+                continue;
             code = sgets(sf, magic, 4, &nread);
             if (code < 0 || nread < 4) {
+                code = 0;
                 sfclose(sf);
                 continue;
             }
 
             code = sfseek(sf, 0, SEEK_SET);
             if (code < 0) {
+                code = 0;
                 sfclose(sf);
                 continue;
             }
@@ -728,11 +727,11 @@ static int pdfi_generate_native_fontmap(pdf_context *ctx)
         (void)pdfi_dict_get_by_key(ctx, ctx->pdfnativefontmap, key, (pdf_obj **)&v);
         for (j = 0; j < key->length; j++)
             dprintf1("%c", key->data[j]);
-        if (v->type == PDF_DICT) {
+        if (pdfi_type_of(v) == PDF_DICT) {
             pdf_num *n;
             pdf_string *val2;
             code = pdfi_dict_get(ctx, (pdf_dict *)v, "Index", (pdf_obj **)&n);
-            if (code >= 0 && n->type == PDF_INT)
+            if (code >= 0 && pdfi_type_of(n) == PDF_INT)
                 find = n->value.i;
             else
                 code = 0;
@@ -758,11 +757,11 @@ static int pdfi_generate_native_fontmap(pdf_context *ctx)
             (void)pdfi_dict_get_by_key(ctx, ctx->pdfnativefontmap, key, (pdf_obj **)&v);
             for (j = 0; j < key->length; j++)
                 dprintf1("%c", key->data[j]);
-            if (v->type == PDF_DICT) {
+            if (pdfi_type_of(v) == PDF_DICT) {
                 pdf_num *n;
                 pdf_string *val2;
                 code = pdfi_dict_get(ctx, (pdf_dict *)v, "Index", (pdf_obj **)&n);
-                if (code >= 0 && n->type == PDF_INT)
+                if (code >= 0 && pdfi_type_of(n) == PDF_INT)
                     find = n->value.i;
                 else
                     code = 0;
@@ -814,48 +813,56 @@ pdf_fontmap_lookup_font(pdf_context *ctx, pdf_name *fname, pdf_obj **mapname, in
             return code;
     }
 
-    code = pdfi_dict_get_by_key(ctx, ctx->pdffontmap, fname, &mname);
-    if (code >= 0) {
-        /* Fontmap can map in multiple "jump" i.e.
-           name -> substitute name
-           subsitute name -> file name
-           So we want to loop until we no more hits.
-         */
-        while(1) {
-            pdf_obj *mname2;
-            code = pdfi_dict_get_by_key(ctx, ctx->pdffontmap, (pdf_name *)mname, &mname2);
-            if (code < 0) break;
-            pdfi_countdown(mname);
-            mname = mname2;
-        }
-    }
-    else if (ctx->pdfnativefontmap != NULL) {
+    if (ctx->pdfnativefontmap != NULL) {
         pdf_obj *record;
         code = pdfi_dict_get_by_key(ctx, ctx->pdfnativefontmap, fname, &record);
-        if (code < 0)
-            return code;
-        if (record->type == PDF_STRING) {
-            mname = record;
-        }
-        else {
-            pdf_num *ind;
-            code = pdfi_dict_get(ctx, (pdf_dict *)record, "Path", &mname);
-            if (code < 0) {
-                pdfi_countdown(record);
-                return code;
+        if (code >= 0) {
+            if (pdfi_type_of(record) == PDF_STRING) {
+                mname = record;
             }
-            code = pdfi_dict_get(ctx, (pdf_dict *)record, "Index", (pdf_obj **)&ind);
-            if (code >= 0 && ind->type == PDF_INT) {
-                *findex = ind->value.i;
+            else if (pdfi_type_of(record) == PDF_DICT) {
+                int64_t i64;
+                code = pdfi_dict_get(ctx, (pdf_dict *)record, "Path", &mname);
+                if (code >= 0)
+                    code = pdfi_dict_get_int(ctx, (pdf_dict *)record, "Index", &i64);
+                if (code < 0) {
+                    pdfi_countdown(record);
+                    return code;
+                }
+                *findex = (int)i64; /* Rangecheck? */
+            }
+            else {
+                pdfi_countdown(record);
+                code = gs_error_undefined;
             }
         }
     }
+    else {
+        code = gs_error_undefined;
+    }
 
-    if (mname != NULL && mname->type == PDF_STRING && pdfi_fmap_file_exists(ctx, (pdf_string *)mname)) {
+    if (code < 0) {
+        code = pdfi_dict_get_by_key(ctx, ctx->pdffontmap, fname, &mname);
+        if (code >= 0) {
+            /* Fontmap can map in multiple "jump" i.e.
+               name -> substitute name
+               subsitute name -> file name
+               So we want to loop until we no more hits.
+             */
+            while(1) {
+                pdf_obj *mname2;
+                code = pdfi_dict_get_by_key(ctx, ctx->pdffontmap, (pdf_name *)mname, &mname2);
+                if (code < 0) break;
+                pdfi_countdown(mname);
+                mname = mname2;
+            }
+        }
+    }
+    if (mname != NULL && pdfi_type_of(mname) == PDF_STRING && pdfi_fmap_file_exists(ctx, (pdf_string *)mname)) {
         *mapname = mname;
         code = 0;
     }
-    else if (mname != NULL && mname->type == PDF_NAME) { /* If we map to a name, we assume (for now) we have the font as a "built-in" */
+    else if (mname != NULL && pdfi_type_of(mname) == PDF_NAME) { /* If we map to a name, we assume (for now) we have the font as a "built-in" */
         *mapname = mname;
         code = 0;
     }
@@ -881,9 +888,9 @@ pdf_fontmap_lookup_cidfont(pdf_context *ctx, pdf_dict *font_dict, pdf_name *name
             return code;
         }
     }
-    if (name == NULL || name->type != PDF_NAME) {
+    if (name == NULL || pdfi_type_of(name) != PDF_NAME) {
         code = pdfi_dict_get(ctx, font_dict, "BaseFont", &cidname);
-        if (code < 0 || cidname->type != PDF_NAME) {
+        if (code < 0 || pdfi_type_of(cidname) != PDF_NAME) {
             pdfi_countdown(cidname);
             return_error(gs_error_undefined);
         }
@@ -910,19 +917,18 @@ pdf_fontmap_lookup_cidfont(pdf_context *ctx, pdf_dict *font_dict, pdf_name *name
         pdfi_countdown(mname);
         mname = mname2;
     }
-    if (mname->type == PDF_DICT) {
+    if (pdfi_type_of(mname) == PDF_DICT) {
         pdf_dict *rec = (pdf_dict *)mname;
         pdf_name *filetype;
         pdf_name *path = NULL;
-        pdf_num *ind = NULL;
         pdf_array *mcsi = NULL;
         pdf_dict *ocsi = NULL;
         pdf_string *ord1 = NULL, *ord2 = NULL;
-        pdf_num *sup1, *sup2;
+        int64_t i64;
 
         code = pdfi_dict_get(ctx, rec, "FileType", (pdf_obj **)&filetype);
         /* We only handle TTF files, just now */
-        if (code < 0 || filetype->type != PDF_NAME || filetype->length != 8 || memcmp(filetype->data, "TrueType", 8) != 0) {
+        if (code < 0 || pdfi_type_of(filetype) != PDF_NAME || filetype->length != 8 || memcmp(filetype->data, "TrueType", 8) != 0) {
             pdfi_countdown(filetype);
             pdfi_countdown(rec);
             return_error(gs_error_undefined);
@@ -930,21 +936,21 @@ pdf_fontmap_lookup_cidfont(pdf_context *ctx, pdf_dict *font_dict, pdf_name *name
         pdfi_countdown(filetype);
 
         code = pdfi_dict_get(ctx, rec, "CSI", (pdf_obj **)&mcsi);
-        if (code < 0 || mcsi->type != PDF_ARRAY) {
+        if (code < 0 || pdfi_type_of(mcsi) != PDF_ARRAY) {
             pdfi_countdown(mcsi);
             pdfi_countdown(rec);
             return_error(gs_error_undefined);
         }
 
         code = pdfi_dict_get(ctx, font_dict, "CIDSystemInfo", (pdf_obj **)&ocsi);
-        if (code < 0 || ocsi->type != PDF_DICT) {
+        if (code < 0 || pdfi_type_of(ocsi) != PDF_DICT) {
             pdfi_countdown(ocsi);
             pdfi_countdown(mcsi);
             pdfi_countdown(rec);
             return_error(gs_error_undefined);
         }
         code = pdfi_dict_get(ctx, ocsi, "Ordering", (pdf_obj **)&ord1);
-        if (code < 0 || ord1->type != PDF_STRING) {
+        if (code < 0 || pdfi_type_of(ord1) != PDF_STRING) {
             pdfi_countdown(ord1);
             pdfi_countdown(ocsi);
             pdfi_countdown(mcsi);
@@ -952,7 +958,7 @@ pdf_fontmap_lookup_cidfont(pdf_context *ctx, pdf_dict *font_dict, pdf_name *name
             return_error(gs_error_undefined);
         }
         code = pdfi_array_get(ctx, mcsi, 0, (pdf_obj **)&ord2);
-        if (code < 0 || ord2->type != PDF_STRING) {
+        if (code < 0 || pdfi_type_of(ord2) != PDF_STRING) {
             pdfi_countdown(ord1);
             pdfi_countdown(ord2);
             pdfi_countdown(ocsi);
@@ -970,43 +976,16 @@ pdf_fontmap_lookup_cidfont(pdf_context *ctx, pdf_dict *font_dict, pdf_name *name
         }
         pdfi_countdown(ord1);
         pdfi_countdown(ord2);
-        code = pdfi_dict_get(ctx, ocsi, "Supplement", (pdf_obj **)&sup1);
-        if (code < 0 || sup1->type != PDF_INT) {
-            pdfi_countdown(ord1);
-            pdfi_countdown(ocsi);
-            pdfi_countdown(mcsi);
-            pdfi_countdown(rec);
-            return_error(gs_error_undefined);
-        }
-        code = pdfi_array_get(ctx, mcsi, 1, (pdf_obj **)&sup2);
-        if (code < 0 || sup2->type != PDF_INT || sup1->value.i != sup2->value.i) {
-            pdfi_countdown(sup1);
-            pdfi_countdown(sup2);
-            pdfi_countdown(ocsi);
-            pdfi_countdown(mcsi);
-            pdfi_countdown(rec);
-            return_error(gs_error_undefined);
-        }
-        pdfi_countdown(sup1);
-        pdfi_countdown(sup2);
-        pdfi_countdown(ocsi);
-        pdfi_countdown(mcsi);
 
         code = pdfi_dict_get(ctx, rec, "Path", (pdf_obj **)&path);
-        if (code < 0 || path->type != PDF_STRING || !pdfi_fmap_file_exists(ctx, (pdf_string *)path)) {
+        if (code < 0 || pdfi_type_of(path) != PDF_STRING || !pdfi_fmap_file_exists(ctx, (pdf_string *)path)) {
             pdfi_countdown(rec);
             return_error(gs_error_undefined);
         }
 
         *mapname = (pdf_obj *)path;
-        code = pdfi_dict_get(ctx, rec, "Index", (pdf_obj **)&ind);
-        if (code >= 0 && ind->type != PDF_INT) {
-            *findex = ind->value.i;
-        }
-        else {
-            *findex = 0;
-        }
-        pdfi_countdown(ind);
+        code = pdfi_dict_get_int(ctx, rec, "Index", &i64);
+        *findex = (code < 0) ? 0 : (int)i64; /* rangecheck? */
         code = 0;
 
     }

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -424,6 +424,7 @@ nooverprint_initialize_device_procs(gx_device *dev)
     set_dev_proc(dev, copy_planes, gx_forward_copy_planes);
     set_dev_proc(dev, copy_alpha_hl_color, gx_forward_copy_alpha_hl_color);
     set_dev_proc(dev, fill_stroke_path, gx_forward_fill_stroke_path);
+    set_dev_proc(dev, lock_pattern, gx_forward_lock_pattern);
 }
 
 /*
@@ -490,7 +491,7 @@ generic_overprint_initialize_device_procs(gx_device *dev)
     set_dev_proc(dev, fill_rectangle_hl_color, overprint_fill_rectangle_hl_color);
     set_dev_proc(dev, dev_spec_op, overprint_dev_spec_op);
     set_dev_proc(dev, copy_planes, gx_forward_copy_planes);
-    set_dev_proc(dev, copy_alpha_hl_color, dev->is_planar ?
+    set_dev_proc(dev, copy_alpha_hl_color, dev->num_planar_planes ?
                                                overprint_copy_alpha_hl_color :
                                                gx_forward_copy_alpha_hl_color);
     set_dev_proc(dev, fill_stroke_path, overprint_fill_stroke_path);
@@ -903,7 +904,9 @@ overprint_copy_alpha_hl_color(gx_device * dev, const byte * data, int data_x,
     overprint_device_t *    opdev = (overprint_device_t *)dev;
     int code;
 
-    opdev->copy_alpha_hl = true;
+    if ((opdev->op_state == OP_STATE_FILL && !opdev->retain_none_fill) ||
+        (opdev->op_state == OP_STATE_STROKE && !opdev->retain_none_stroke))
+        opdev->copy_alpha_hl = true;
     code = gx_default_copy_alpha_hl_color(dev, data, data_x, raster, id, x, y,
                                           width, height, pdcolor, depth);
     opdev->copy_alpha_hl = false;
@@ -930,7 +933,7 @@ overprint_copy_planes(gx_device * dev, const byte * data, int data_x, int raster
     uchar                   num_comps;
     uchar                   k,j;
     gs_memory_t *           mem = dev->memory;
-    gx_color_index          comps = opdev->op_state == OP_STATE_FILL ? opdev->drawn_comps_fill : opdev->drawn_comps_stroke;
+    gx_color_index          comps_orig = opdev->op_state == OP_STATE_FILL ? opdev->drawn_comps_fill : opdev->drawn_comps_stroke;
     byte                    *curr_data = (byte *) data + data_x;
     int                     row, offset;
 
@@ -972,6 +975,7 @@ overprint_copy_planes(gx_device * dev, const byte * data, int data_x, int raster
         /* step through the height */
         row = 0;
         while (h-- > 0 && code >= 0) {
+            gx_color_index comps = comps_orig;
             gb_rect.p.y = y++;
             gb_rect.q.y = y;
             offset = row * raster_in + data_x;
@@ -981,23 +985,23 @@ overprint_copy_planes(gx_device * dev, const byte * data, int data_x, int raster
             for (k = 0; k < tdev->color_info.num_components; k++) {
                 /* First set the params to zero for all planes except the one we want */
                 for (j = 0; j < tdev->color_info.num_components; j++)
-                        gb_params.data[j] = 0;
-                    gb_params.data[k] = gb_buff + k * raster;
-                    code = dev_proc(tdev, get_bits_rectangle) (tdev, &gb_rect,
-                                                               &gb_params);
-                    if (code < 0) {
-                        gs_free_object(mem, gb_buff, "overprint_copy_planes" );
-                        return code;
-                    }
-                    /* Skip the plane if this component is not to be drawn.  If
-                       its the one that we want to draw, replace it with our
-                       buffer data */
-                    if ((comps & 0x01) == 1) {
-                        memcpy(gb_params.data[k], curr_data, w);
-                    }
-                    /* Next plane */
-                    curr_data += plane_height * raster_in;
-                    comps >>= 1;
+                    gb_params.data[j] = 0;
+                gb_params.data[k] = gb_buff + k * raster;
+                code = dev_proc(tdev, get_bits_rectangle) (tdev, &gb_rect,
+                                                           &gb_params);
+                if (code < 0) {
+                    gs_free_object(mem, gb_buff, "overprint_copy_planes" );
+                    return code;
+                }
+                /* Skip the plane if this component is not to be drawn.  If
+                   its the one that we want to draw, replace it with our
+                   buffer data */
+                if ((comps & 0x01) == 1) {
+                    memcpy(gb_params.data[k], curr_data, w);
+                }
+                /* Next plane */
+                curr_data += plane_height * raster_in;
+                comps >>= 1;
             }
             code = dev_proc(tdev, copy_planes)(tdev, gb_buff, 0, raster,
                                                gs_no_bitmap_id, x, y - 1, w, 1, 1);
@@ -1300,6 +1304,27 @@ overprint_dev_spec_op(gx_device* pdev, int dev_spec_op,
     if (dev_spec_op == gxdso_overprint_active)
         return !opdev->is_idle;
 
+    if (dev_spec_op == gxdso_abuf_optrans)
+    {
+        overprint_abuf_state_t *state = (overprint_abuf_state_t *)data;
+        switch (state->op_trans)
+        {
+        case OP_FS_TRANS_PREFILL:
+            state->storage[0] = opdev->op_state;
+            opdev->op_state = OP_STATE_FILL;
+            break;
+        case OP_FS_TRANS_PRESTROKE:
+            opdev->op_state = OP_STATE_STROKE;
+            break;
+        default:
+        case OP_FS_TRANS_POSTSTROKE:
+        case OP_FS_TRANS_CLEANUP:
+            opdev->op_state = (OP_FS_STATE)state->storage[0];
+            break;
+        }
+        return 0;
+    }
+
     if (dev_spec_op == gxdso_device_child) {
         gxdso_device_child_request *d = (gxdso_device_child_request *)data;
         if (d->target == pdev) {
@@ -1320,7 +1345,7 @@ overprint_dev_spec_op(gx_device* pdev, int dev_spec_op,
 static int
 fill_in_procs(gx_device_procs * pprocs,
               dev_proc_initialize_device_procs(initialize_device_procs),
-              int is_planar)
+              int num_planar_planes)
 {
     gx_device_forward tmpdev;
 
@@ -1333,7 +1358,7 @@ fill_in_procs(gx_device_procs * pprocs,
     memcpy( &tmpdev.color_info,
             &gs_overprint_device.color_info,
             sizeof(tmpdev.color_info) );
-    tmpdev.is_planar = is_planar;
+    tmpdev.num_planar_planes = num_planar_planes;
 
     /*
      * Prevent the check_device_separable routine from executing while we
@@ -1395,17 +1420,17 @@ c_overprint_create_default_compositor(
         return code;
     code = fill_in_procs(&opdev->no_overprint_procs,
                          nooverprint_initialize_device_procs,
-                         tdev->is_planar);
+                         tdev->num_planar_planes);
     if (code < 0)
         return code;
     code = fill_in_procs(&opdev->generic_overprint_procs,
                          generic_overprint_initialize_device_procs,
-                         tdev->is_planar);
+                         tdev->num_planar_planes);
     if (code < 0)
         return code;
     code = fill_in_procs(&opdev->sep_overprint_procs,
                          sep_overprint_initialize_device_procs,
-                         tdev->is_planar);
+                         tdev->num_planar_planes);
     if (code < 0)
         return code;
 
@@ -1413,7 +1438,7 @@ c_overprint_create_default_compositor(
     gx_device_set_target((gx_device_forward *)opdev, tdev);
     opdev->pad = tdev->pad;
     opdev->log2_align_mod = tdev->log2_align_mod;
-    opdev->is_planar = tdev->is_planar;
+    opdev->num_planar_planes = tdev->num_planar_planes;
 
     params = ovrpct->params;
     params.idle = ovrpct->idle;

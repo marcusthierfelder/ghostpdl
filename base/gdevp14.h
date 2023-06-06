@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Definitions and interface for PDF 1.4 rendering device */
@@ -39,6 +39,13 @@ typedef enum {
     PDF14_OP_STATE_FILL = 1,
     PDF14_OP_STATE_STROKE = 2,
 } PDF14_OP_FS_STATE;
+
+typedef enum {
+    PDF14_BLEND_CS_UNSPECIFIED = 0,
+    PDF14_BLEND_CS_TARGET_CIELAB,
+    PDF14_BLEND_CS_OUTPUTINTENT,
+    PDF14_BLEND_CS_SPECIFIED
+} pdf14_blend_cs_t;
 
 /*
  * This structure contains procedures for processing routine which differ
@@ -232,7 +239,7 @@ typedef struct pdf14_device_s {
     gx_device * pclist_device;
     bool free_devicen;              /* Used to avoid freeing a deviceN parameter from target clist device */
     bool sep_device;
-    bool using_blend_cs;
+    pdf14_blend_cs_t blend_cs_state;
     bool overprint_sim;
     bool target_support_devn;
 
@@ -264,6 +271,7 @@ typedef struct pdf14_device_s {
     const gx_color_map_procs *(*save_get_cmap_procs)(const gs_gstate *,
                                                      const gx_device *);
     gx_device_color_info saved_target_color_info;
+    int interpolate_threshold;
     dev_proc_encode_color(*saved_target_encode_color);
     dev_proc_decode_color(*saved_target_decode_color);
     dev_proc_get_color_mapping_procs(*saved_target_get_color_mapping_procs);

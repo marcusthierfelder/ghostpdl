@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -157,7 +157,7 @@ pdf_pattern(gx_device_pdf *pdev, const gx_drawing_color *pdc,
 
         if (pcd_XObject == 0)
             return_error(gs_error_VMerror);
-        gs_sprintf(key, "/R%ld", pcs_image->id);
+        gs_snprintf(key, sizeof(key), "/R%ld", pcs_image->id);
         /* This is non-obvious code. Previously we would put the image object (pcs_image)
          * into the Resources dit. When we come to write out the Resources dict
          * that code writes a reference (index 0 R) using the ID from the object.
@@ -203,7 +203,7 @@ pdf_pattern(gx_device_pdf *pdev, const gx_drawing_color *pdc,
     {
         char buf[MAX_REF_CHARS + 6 + 1]; /* +6 for /R# Do\n */
 
-        gs_sprintf(buf, "/R%ld Do\n", pcs_image->id);
+        gs_snprintf(buf, sizeof(buf), "/R%ld Do\n", pcs_image->id);
         cos_stream_add_bytes(pdev, pcos, (const byte *)buf, strlen(buf));
     }
 
@@ -622,7 +622,7 @@ pdf_put_linear_shading(gx_device_pdf *pdev, cos_dict_t *pscd, const float *Coord
     if (Extend[0] | Extend[1]) {
         char extend_str[1 + 5 + 1 + 5 + 1 + 1]; /* [bool bool] */
 
-        gs_sprintf(extend_str, "[%s %s]",
+        gs_snprintf(extend_str, sizeof(extend_str), "[%s %s]",
                 (Extend[0] ? "true" : "false"),
                 (Extend[1] ? "true" : "false"));
         code = cos_dict_put_c_key_string(pscd, "/Extend",

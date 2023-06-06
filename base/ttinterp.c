@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -1825,6 +1825,12 @@ static int nInstrCount=0;
   {
     if ( args[1] == 0 )
     {
+      if ( BOUNDS(CUR.IP + args[0], CUR.codeSize ) )
+      {
+        CUR.error = TT_Err_Invalid_Reference;
+        return;
+      }
+
       CUR.IP      += (Int)(args[0]);
       CUR.step_ins = FALSE;
 
@@ -2319,7 +2325,8 @@ static int nInstrCount=0;
 
     L = (Int)CUR.code[CUR.IP + 1];
 
-    if ( BOUNDS( L, CUR.stackSize+1-CUR.top ) )
+    if ( BOUNDS( L, CUR.stackSize+1-CUR.top )
+      || BOUNDS( L, CUR.codeSize+1-CUR.IP))
     {
       CUR.error = TT_Err_Stack_Overflow;
       return;
@@ -2343,7 +2350,9 @@ static int nInstrCount=0;
 
     L = (Int)CUR.code[CUR.IP + 1];
 
-    if ( BOUNDS( L, CUR.stackSize+1-CUR.top ) )
+    /* GET_ShortIns() reads two values from the execution stream */
+    if ( BOUNDS( L, CUR.stackSize+1-CUR.top )
+      || BOUNDS( L * 2, CUR.codeSize+1-CUR.IP))
     {
       CUR.error = TT_Err_Stack_Overflow;
       return;
@@ -2370,7 +2379,8 @@ static int nInstrCount=0;
 
     L = ((Int)CUR.opcode - 0xB0 + 1);
 
-    if ( BOUNDS( L, CUR.stackSize+1-CUR.top ) )
+    if ( BOUNDS( L, CUR.stackSize+1-CUR.top )
+      || BOUNDS( CUR.IP + L, CUR.codeSize ))
     {
       CUR.error = TT_Err_Stack_Overflow;
       return;
@@ -2392,7 +2402,8 @@ static int nInstrCount=0;
 
     L = CUR.opcode - 0xB8 + 1;
 
-    if ( BOUNDS( L, CUR.stackSize+1-CUR.top ) )
+    if ( BOUNDS( L, CUR.stackSize+1-CUR.top )
+      || BOUNDS( CUR.IP + (L * 2), CUR.codeSize ))
     {
       CUR.error = TT_Err_Stack_Overflow;
       return;
@@ -3628,7 +3639,8 @@ static int nInstrCount=0;
 
     point = (Int)args[0];
 
-    if ( BOUNDS( args[0], CUR.zp1.n_points ) )
+    if ( BOUNDS( args[0], CUR.zp1.n_points )
+      || BOUNDS( CUR.GS.rp0, CUR.zp0.n_points) )
     {
       CUR.error = TT_Err_Invalid_Reference;
       return;
@@ -4001,7 +4013,8 @@ static int nInstrCount=0;
 
       point = (Int)CUR.stack[CUR.args];
 
-      if ( BOUNDS( point, CUR.zp1.n_points ) )
+      if ( BOUNDS( point, CUR.zp1.n_points ) ||
+           BOUNDS( CUR.GS.rp0, CUR.zp0.n_points ) )
       {
         CUR.error = TT_Err_Invalid_Reference;
         return;
@@ -4059,7 +4072,8 @@ static int nInstrCount=0;
     if ( BOUNDS( b0, CUR.zp0.n_points ) ||
          BOUNDS( b1, CUR.zp0.n_points ) ||
          BOUNDS( a0, CUR.zp1.n_points ) ||
-         BOUNDS( a1, CUR.zp1.n_points ) )
+         BOUNDS( a1, CUR.zp1.n_points ) ||
+         BOUNDS( point, CUR.zp2.n_points) )
     {
       CUR.error = TT_Err_Invalid_Reference;
       return;
@@ -4378,8 +4392,14 @@ static int nInstrCount=0;
         end_point   = CUR.pts.contours[contour];
         first_point = point;
 
-        while ( point <= end_point && (CUR.pts.touch[point] & mask) == 0 )
+        while ( point <= end_point && point < CUR.pts.n_points && (CUR.pts.touch[point] & mask) == 0 )
           point++;
+
+        if (BOUNDS(point, CUR.pts.n_points ))
+        {
+            CUR.error = TT_Err_Invalid_Reference;
+            return;
+        }
 
         if ( point <= end_point )
         {
@@ -4392,12 +4412,21 @@ static int nInstrCount=0;
           {
             if ( (CUR.pts.touch[point] & mask) != 0 )
             {
-              Interp( (Int)(cur_touched + 1),
+              if (BOUNDS(cur_touched,  CUR.pts.n_points)
+               || BOUNDS(point, CUR.pts.n_points))
+              {
+                 CUR.error = TT_Err_Invalid_Reference;
+                 return;
+              }
+              else
+              {
+                Interp( (Int)(cur_touched + 1),
                       (Int)(point - 1),
                       (Int)cur_touched,
                       (Int)point,
                       &V );
-              cur_touched = point;
+                cur_touched = point;
+              }
             }
 
             point++;

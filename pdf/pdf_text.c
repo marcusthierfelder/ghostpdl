@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Text operations for the PDF interpreter */
@@ -21,9 +21,9 @@
 #include "pdf_image.h"
 #include "pdf_colour.h"
 #include "pdf_stack.h"
-#include "pdf_gstate.h"
 #include "pdf_font.h"
 #include "pdf_font_types.h"
+#include "pdf_gstate.h"
 #include "pdf_trans.h"
 #include "pdf_optcontent.h"
 
@@ -108,7 +108,9 @@ int pdfi_ET(pdf_context *ctx)
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_ETNOTEXTBLOCK, "pdfi_ET", NULL);
-        return_error(gs_error_syntaxerror);
+        if (ctx->args.pdfstoponwarning)
+            return_error(gs_error_syntaxerror);
+        return 0;
     }
 
     ctx->text.BlockDepth--;
@@ -188,65 +190,30 @@ static int pdfi_set_Tc(pdf_context *ctx, double Tc)
 
 int pdfi_Tc(pdf_context *ctx)
 {
-    int code = 0;
-    pdf_num *n = NULL;
+    int code;
+    double d;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_real(ctx, &d);
+    if (code < 0)
+        return code;
 
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        code = pdfi_set_Tc(ctx, (double)n->value.i);
-    else {
-        if (n->type == PDF_REAL)
-            code = pdfi_set_Tc(ctx, n->value.d);
-        else
-            code = gs_note_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    return pdfi_set_Tc(ctx, d);
 }
 
 int pdfi_Td(pdf_context *ctx)
 {
     int code;
-    pdf_num *Tx = NULL, *Ty = NULL;
+    double Txy[2];
     gs_matrix m, mat;
 
-    if (pdfi_count_stack(ctx) < 2) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_reals(ctx, Txy, 2);
+    if (code < 0)
+        return code;
 
     gs_make_identity(&m);
 
-    Ty = (pdf_num *)ctx->stack_top[-1];
-    Tx = (pdf_num *)ctx->stack_top[-2];
-
-    if (Tx->type == PDF_INT) {
-        m.tx = (float)Tx->value.i;
-    } else {
-        if (Tx->type == PDF_REAL) {
-            m.tx = (float)Tx->value.d;
-        } else {
-            code = gs_note_error(gs_error_typecheck);
-            goto Td_error;
-        }
-    }
-
-    if (Ty->type == PDF_INT) {
-        m.ty = (float)Ty->value.i;
-    } else {
-        if (Ty->type == PDF_REAL) {
-            m.ty = (float)Ty->value.d;
-        } else {
-            code = gs_note_error(gs_error_typecheck);
-            goto Td_error;
-        }
-    }
+    m.tx = Txy[0];
+    m.ty = Txy[1];
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TEXTOPNOBT, "pdfi_Td", NULL);
@@ -254,70 +221,38 @@ int pdfi_Td(pdf_context *ctx)
         gs_make_identity(&mat);
         code = gs_settextmatrix(ctx->pgs, &mat);
         if (code < 0)
-            goto Td_error;
+            return code;
 
         code = gs_settextlinematrix(ctx->pgs, &mat);
         if (code < 0)
-            goto Td_error;
+            return code;
     }
 
     code = gs_matrix_multiply(&m, &ctx->pgs->textlinematrix, &mat);
     if (code < 0)
-        goto Td_error;
+        return code;
 
     code = gs_settextmatrix(ctx->pgs, (gs_matrix *)&mat);
     if (code < 0)
-        goto Td_error;
+        return code;
 
-    code = gs_settextlinematrix(ctx->pgs, (gs_matrix *)&mat);
-    if (code < 0)
-        goto Td_error;
-
-    pdfi_pop(ctx, 2);
-    return code;
-
-Td_error:
-    pdfi_pop(ctx, 2);
-    return code;
+    return gs_settextlinematrix(ctx->pgs, (gs_matrix *)&mat);
 }
 
 int pdfi_TD(pdf_context *ctx)
 {
     int code;
-    pdf_num *Tx = NULL, *Ty = NULL;
+    double Txy[2];
     gs_matrix m, mat;
-
-    if (pdfi_count_stack(ctx) < 2) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
 
     gs_make_identity(&m);
 
-    Ty = (pdf_num *)ctx->stack_top[-1];
-    Tx = (pdf_num *)ctx->stack_top[-2];
+    code = pdfi_destack_reals(ctx, Txy, 2);
+    if (code < 0)
+        return code;
 
-    if (Tx->type == PDF_INT) {
-        m.tx = (float)Tx->value.i;
-    } else {
-        if (Tx->type == PDF_REAL) {
-            m.tx = (float)Tx->value.d;
-        } else {
-            code = gs_note_error(gs_error_typecheck);
-            goto TD_error;
-        }
-    }
-
-    if (Ty->type == PDF_INT) {
-        m.ty = (float)Ty->value.i;
-    } else {
-        if (Ty->type == PDF_REAL) {
-            m.ty = (float)Ty->value.d;
-        } else {
-            code = gs_note_error(gs_error_typecheck);
-            goto TD_error;
-        }
-    }
+    m.tx = Txy[0];
+    m.ty = Txy[1];
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TEXTOPNOBT, "pdfi_TD", NULL);
@@ -325,35 +260,26 @@ int pdfi_TD(pdf_context *ctx)
         gs_make_identity(&mat);
         code = gs_settextmatrix(ctx->pgs, &mat);
         if (code < 0)
-            goto TD_error;
+            return code;
 
         code = gs_settextlinematrix(ctx->pgs, &mat);
         if (code < 0)
-            goto TD_error;
+            return code;
     }
 
     code = pdfi_set_TL(ctx, m.ty * 1.0f);
     if (code < 0)
-        goto TD_error;
+        return code;
 
     code = gs_matrix_multiply(&m, &ctx->pgs->textlinematrix, &mat);
     if (code < 0)
-        goto TD_error;
+        return code;
 
     code = gs_settextmatrix(ctx->pgs, (gs_matrix *)&mat);
     if (code < 0)
-        goto TD_error;
+        return code;
 
-    code = gs_settextlinematrix(ctx->pgs, (gs_matrix *)&mat);
-    if (code < 0)
-        goto TD_error;
-
-    pdfi_pop(ctx, 2);
-    return code;
-
-TD_error:
-    pdfi_pop(ctx, 2);
-    return code;
+    return gs_settextlinematrix(ctx->pgs, (gs_matrix *)&mat);
 }
 
 /* This routine sets up most of the text params structure. In particular it
@@ -436,7 +362,7 @@ static int pdfi_show_set_params(pdf_context *ctx, pdf_string *s, gs_text_params_
             for (i = 0;i < s->length; i++) {
                 /* Get the width (in unscaled text units) */
                 if (s->data[i] < current_font->FirstChar || s->data[i] > current_font->LastChar)
-                    width = 0;
+                    width = current_font->MissingWidth;
                 else
                     width = current_font->Widths[s->data[i] - current_font->FirstChar];
                 /* And convert the width into an appropriate value for the current environment */
@@ -486,6 +412,11 @@ static int pdfi_show_set_params(pdf_context *ctx, pdf_string *s, gs_text_params_
         }
         text->size = s->length;
     }
+    else {
+        code = gs_note_error(gs_error_invalidfont);
+        goto text_params_error;
+    }
+
     return 0;
 
 text_params_error:
@@ -816,12 +747,12 @@ static int pdfi_show_Tr_preserve(pdf_context *ctx, gs_text_params_t *text)
     Trmode = gs_currenttextrenderingmode(ctx->pgs);
     if (Trmode == 3) {
         if (current_font->pdfi_font_type == e_pdf_font_type3)
-            text->operation = TEXT_FROM_CHARS | TEXT_DO_NONE | TEXT_RENDER_MODE_3;
+            text->operation = TEXT_RETURN_WIDTH | TEXT_FROM_CHARS | TEXT_DO_NONE | TEXT_RENDER_MODE_3;
         else
-            text->operation = TEXT_FROM_BYTES | TEXT_DO_NONE | TEXT_RENDER_MODE_3;
+            text->operation = TEXT_RETURN_WIDTH | TEXT_FROM_BYTES | TEXT_DO_NONE | TEXT_RENDER_MODE_3;
     }
     else
-        text->operation |= TEXT_DO_DRAW;
+        text->operation |= TEXT_RETURN_WIDTH | TEXT_DO_DRAW;
 
     /* If we're preserving the text rendering mode, then we don't run a separate
      * stroke operation, we do effectively run a fill. The fill setup loads the
@@ -866,7 +797,7 @@ static int pdfi_show_Tr_preserve(pdf_context *ctx, gs_text_params_t *text)
 
 static int pdfi_show(pdf_context *ctx, pdf_string *s)
 {
-    int code = 0;
+    int code = 0, SavedTextDepth = 0;
     int code1 = 0;
     gs_text_params_t text;
     pdf_font *current_font = NULL;
@@ -895,7 +826,18 @@ static int pdfi_show(pdf_context *ctx, pdf_string *s)
     if (code < 0)
         goto show_error;
 
+    /* <sigh> Ugliness......
+     * It seems that transparency can require that we set a transparency Group
+     * during the course of a text operation, and that Group can, of course,
+     * execute operations which are barred during text operations (because
+     * the Group doesn't affect the text as such). So we need to not throw
+     * errors if that happens. Do that by just setting the BlockDepth to 0.
+     */
+    SavedTextDepth = ctx->text.BlockDepth;
+    ctx->text.BlockDepth = 0;
     code = pdfi_trans_setup_text(ctx, &state, true);
+    ctx->text.BlockDepth = SavedTextDepth;
+
     if (code >= 0) {
         if (ctx->device_state.preserve_tr_mode) {
         code = pdfi_show_Tr_preserve(ctx, &text);
@@ -979,11 +921,17 @@ int pdfi_string_bbox(pdf_context *ctx, pdf_string *s, gs_rect *bboxout, gs_point
 
     for_stroke = current_font->pdfi_font_type == e_pdf_font_type3 ? false : for_stroke;
 
-    bbdev = gs_alloc_struct_immovable(ctx->memory, gx_device_bbox, &st_device_bbox, "pdfi_string_bbox(bbdev)");
-    if (bbdev == NULL)
-        return_error(gs_error_VMerror);
-
-    gx_device_bbox_init(bbdev, NULL, ctx->memory);
+    if (ctx->devbbox == NULL) {
+        bbdev = gs_alloc_struct_immovable(ctx->memory, gx_device_bbox, &st_device_bbox, "pdfi_string_bbox(bbdev)");
+        if (bbdev == NULL)
+           return_error(gs_error_VMerror);
+        gx_device_bbox_init(bbdev, NULL, ctx->memory);
+        ctx->devbbox = (gx_device *)bbdev;
+        rc_increment(ctx->devbbox);
+    }
+    else {
+        bbdev = (gx_device_bbox *)ctx->devbbox;
+    }
     gx_device_retain((gx_device *)bbdev, true);
     gx_device_bbox_set_white_opaque(bbdev, true);
 
@@ -1035,7 +983,11 @@ int pdfi_string_bbox(pdf_context *ctx, pdf_string *s, gs_rect *bboxout, gs_point
     if (code < 0)
         goto out;
 
+    /* Pretend to have at least one BT or pdfi_show will generate a spurious warning */
+    ctx->text.BlockDepth++;
     code = pdfi_show(ctx, s);
+    /* And an ET */
+    ctx->text.BlockDepth--;
     if (code < 0)
         goto out;
 
@@ -1058,6 +1010,7 @@ int pdfi_string_bbox(pdf_context *ctx, pdf_string *s, gs_rect *bboxout, gs_point
     }
 out:
     pdfi_grestore(ctx);
+    (void)gs_closedevice((gx_device *)bbdev);
     gx_device_retain((gx_device *)bbdev, false);
 
     return code;
@@ -1078,8 +1031,17 @@ int pdfi_Tj(pdf_context *ctx)
         goto exit;
 
     s = (pdf_string *)ctx->stack_top[-1];
-    if (s->type != PDF_STRING)
+    if (pdfi_type_of(s) != PDF_STRING) {
+        pdfi_pop(ctx, 1);
         return_error(gs_error_typecheck);
+    }
+
+    /* We can't rely on the stack reference because an error during
+       the text operation (i.e. retrieving objects for glyph metrics
+       may cause the stack to be cleared.
+     */
+    pdfi_countup(s);
+    pdfi_pop(ctx, 1);
 
     /* Save the CTM for later restoration */
     saved = ctm_only(ctx->pgs);
@@ -1155,7 +1117,7 @@ Tj_error:
     ctx->pgs->line_params.half_width = linewidth;
 
  exit:
-    pdfi_pop(ctx, 1);
+    pdfi_countdown(s);
     return code;
 }
 
@@ -1186,10 +1148,12 @@ int pdfi_TJ(pdf_context *ctx)
         goto exit;
 
     a = (pdf_array *)ctx->stack_top[-1];
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_pop(ctx, 1);
         return gs_note_error(gs_error_typecheck);
     }
+    pdfi_countup(a);
+    pdfi_pop(ctx, 1);
 
     /* Save the CTM for later restoration */
     saved = ctm_only(ctx->pgs);
@@ -1246,29 +1210,17 @@ int pdfi_TJ(pdf_context *ctx)
         if (code < 0)
             goto TJ_error;
 
-        if (o->type == PDF_INT) {
-            dx = (double)((pdf_num *)o)->value.i / -1000;
+        if (pdfi_type_of(o) == PDF_STRING)
+            code = pdfi_show(ctx, (pdf_string *)o);
+        else {
+            code = pdfi_obj_to_real(ctx, o, &dx);
+            if (code < 0)
+                goto TJ_error;
+            dx /= -1000;
             if (current_font->pfont && current_font->pfont->WMode == 0)
                 code = gs_rmoveto(ctx->pgs, dx, 0);
             else
                 code = gs_rmoveto(ctx->pgs, 0, dx);
-            if (code < 0)
-                goto TJ_error;
-        } else {
-            if (o->type == PDF_REAL) {
-                dx = ((pdf_num *)o)->value.d / -1000;
-                if (current_font->pfont && current_font->pfont->WMode == 0)
-                    code = gs_rmoveto(ctx->pgs, dx, 0);
-                else
-                    code = gs_rmoveto(ctx->pgs, 0, dx);
-                if (code < 0)
-                    goto TJ_error;
-            } else {
-                if (o->type == PDF_STRING)
-                    code = pdfi_show(ctx, (pdf_string *)o);
-                else
-                    code = gs_note_error(gs_error_typecheck);
-            }
         }
         pdfi_countdown(o);
         o = NULL;
@@ -1301,7 +1253,7 @@ TJ_error:
     ctx->pgs->line_params.half_width = linewidth;
 
  exit:
-    pdfi_pop(ctx, 1);
+    pdfi_countdown(a);
     return code;
 }
 
@@ -1312,53 +1264,25 @@ static int pdfi_set_TL(pdf_context *ctx, double TL)
 
 int pdfi_TL(pdf_context *ctx)
 {
-    int code = 0;
-    pdf_num *n = NULL;
+    int code;
+    double d;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_real(ctx, &d);
+    if (code < 0)
+        return code;
 
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        code = pdfi_set_TL(ctx, (double)(n->value.i * -1));
-    else {
-        if (n->type == PDF_REAL)
-            code = pdfi_set_TL(ctx, n->value.d * -1.0);
-        else
-            code = gs_note_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    return pdfi_set_TL(ctx, -d);
 }
 
 int pdfi_Tm(pdf_context *ctx)
 {
-    int code = 0, i;
+    int code;
     float m[6];
-    pdf_num *n = NULL;
     gs_matrix mat;
 
-    if (pdfi_count_stack(ctx) < 6) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
-    for (i = 1;i < 7;i++) {
-        n = (pdf_num *)ctx->stack_top[-1 * i];
-        if (n->type == PDF_INT)
-            m[6 - i] = (float)n->value.i;
-        else {
-            if (n->type == PDF_REAL)
-                m[6 - i] = (float)n->value.d;
-            else {
-                pdfi_pop(ctx, 6);
-                return_error(gs_error_typecheck);
-            }
-        }
-    }
-    pdfi_pop(ctx, 6);
+    code = pdfi_destack_floats(ctx, m, 6);
+    if (code < 0)
+        return code;
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TEXTOPNOBT, "pdfi_Tm", NULL);
@@ -1380,91 +1304,72 @@ int pdfi_Tm(pdf_context *ctx)
     if (code < 0)
         return code;
 
-    code = gs_settextlinematrix(ctx->pgs, (gs_matrix *)&m);
-
-    return code;
+    return gs_settextlinematrix(ctx->pgs, (gs_matrix *)&m);
 }
 
 int pdfi_Tr(pdf_context *ctx)
 {
-    int code = 0, mode = 0;
-    pdf_num *n = NULL;
+    int code;
+    int64_t mode;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
-
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        mode = n->value.i;
-    else {
-        if (n->type == PDF_REAL)
-            mode = (int)n->value.d;
-        else {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_typecheck);
-        }
-    }
-    pdfi_pop(ctx, 1);
+    code = pdfi_destack_int(ctx, &mode);
+    if (code < 0)
+        return code;
 
     if (mode < 0 || mode > 7)
-        code = gs_note_error(gs_error_rangecheck);
-    else {
+        return_error(gs_error_rangecheck);
+
 /* See comment regarding text rendering modes involving clip in pdfi_BT() above.
  * The commented out code here will be needed when we enhance pdfwrite so that
  * we don't need to do the clip separately.
  */
-/*        if (!ctx->device_state.preserve_tr_mode) {*/
-            gs_point initial_point;
+/*
+    if (ctx->device_state.preserve_tr_mode) {
+        gs_settextrenderingmode(ctx->pgs, mode);
+    } else
+*/
+    {
+        gs_point initial_point;
 
-            /* Detect attempts to switch from a clipping mode to a non-clipping
-             * mode, this is defined as invalid in the spec.
+        /* Detect attempts to switch from a clipping mode to a non-clipping
+         * mode, this is defined as invalid in the spec.
+         */
+        if (gs_currenttextrenderingmode(ctx->pgs) > 3 && mode < 4 && ctx->text.BlockDepth != 0)
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_BADTRSWITCH, "pdfi_Tr", NULL);
+
+        if (gs_currenttextrenderingmode(ctx->pgs) < 4 && mode >= 4 && ctx->text.BlockDepth != 0) {
+            /* If we are switching from a non-clip text rendering mode to a
+             * mode involving a cip, and we are already inside a text block,
+             * put a gsave in place so that we can accumulate a path for
+             * clipping without disturbing any existing path in the
+             * graphics state.
              */
-            if (gs_currenttextrenderingmode(ctx->pgs) > 3 && mode < 4 && ctx->text.BlockDepth != 0)
-                pdfi_set_warning(ctx, 0, NULL, W_PDF_BADTRSWITCH, "pdfi_Tr", NULL);
-
-            if (gs_currenttextrenderingmode(ctx->pgs) < 4 && mode >= 4 && ctx->text.BlockDepth != 0) {
-                /* If we are switching from a non-clip text rendering mode to a
-                 * mode involving a cip, and we are already inside a text block,
-                 * put a gsave in place so that we can accumulate a path for
-                 * clipping without disturbing any existing path in the
-                 * graphics state.
-                 */
-                gs_settextrenderingmode(ctx->pgs, mode);
-                pdfi_gsave(ctx);
-                /* Capture the current position */
-                code = gs_currentpoint(ctx->pgs, &initial_point);
-                /* Start a new path (so our clip doesn't include any
-                 * already extant path in the graphics state)
-                 */
-                gs_newpath(ctx->pgs);
-                gs_moveto(ctx->pgs, initial_point.x, initial_point.y);
-            }
-            else {
-                if (gs_currenttextrenderingmode(ctx->pgs) >= 4 && mode < 4 && ctx->text.BlockDepth != 0) {
-                    /* If we are switching from a clipping mode to a non-clipping
-                     * mode then behave as if we had an implicit ET to flush the
-                     * accumulated text to a clip, then set the text rendering mode
-                     * to the non-clip mode, and perform an implicit BT.
-                     */
-                    code = pdfi_ET(ctx);
-                    if (code < 0)
-                        return code;
-                    gs_settextrenderingmode(ctx->pgs, mode);
-                    code = pdfi_BT(ctx);
-                    if (code < 0)
-                        return code;
-                }
-                else
-                    gs_settextrenderingmode(ctx->pgs, mode);
-            }
-/*        }
+            gs_settextrenderingmode(ctx->pgs, mode);
+            pdfi_gsave(ctx);
+            /* Capture the current position */
+            code = gs_currentpoint(ctx->pgs, &initial_point);
+            /* Start a new path (so our clip doesn't include any
+             * already extant path in the graphics state)
+             */
+            gs_newpath(ctx->pgs);
+            gs_moveto(ctx->pgs, initial_point.x, initial_point.y);
+        } else if (gs_currenttextrenderingmode(ctx->pgs) >= 4 && mode < 4 && ctx->text.BlockDepth != 0) {
+            /* If we are switching from a clipping mode to a non-clipping
+             * mode then behave as if we had an implicit ET to flush the
+             * accumulated text to a clip, then set the text rendering mode
+             * to the non-clip mode, and perform an implicit BT.
+             */
+            code = pdfi_ET(ctx);
+            if (code < 0)
+                return code;
+            gs_settextrenderingmode(ctx->pgs, mode);
+            code = pdfi_BT(ctx);
+            if (code < 0)
+                return code;
+        }
         else
-            gs_settextrenderingmode(ctx->pgs, mode);*/
+            gs_settextrenderingmode(ctx->pgs, mode);
     }
-
     return code;
 }
 
@@ -1475,26 +1380,14 @@ static int pdfi_set_Ts(pdf_context *ctx, double Ts)
 
 int pdfi_Ts(pdf_context *ctx)
 {
-    int code = 0;
-    pdf_num *n = NULL;
+    int code;
+    double d;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_real(ctx, &d);
+    if (code < 0)
+        return code;
 
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        code = pdfi_set_Ts(ctx, (double)n->value.i);
-    else {
-        if (n->type == PDF_REAL)
-            code = pdfi_set_Ts(ctx, n->value.d);
-        else
-            code = gs_note_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    return pdfi_set_Ts(ctx, d);
 }
 
 static int pdfi_set_Tw(pdf_context *ctx, double Tw)
@@ -1504,50 +1397,26 @@ static int pdfi_set_Tw(pdf_context *ctx, double Tw)
 
 int pdfi_Tw(pdf_context *ctx)
 {
-    int code = 0;
-    pdf_num *n = NULL;
+    int code;
+    double d;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_real(ctx, &d);
+    if (code < 0)
+        return code;
 
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        code = pdfi_set_Tw(ctx, (double)n->value.i);
-    else {
-        if (n->type == PDF_REAL)
-            code = pdfi_set_Tw(ctx, n->value.d);
-        else
-            code = gs_note_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    return pdfi_set_Tw(ctx, d);
 }
 
 int pdfi_Tz(pdf_context *ctx)
 {
-    int code = 0;
-    pdf_num *n = NULL;
+    int code;
+    double d;
 
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
-    }
+    code = pdfi_destack_real(ctx, &d);
+    if (code < 0)
+        return code;
 
-    n = (pdf_num *)ctx->stack_top[-1];
-
-    if (n->type == PDF_INT)
-        code = gs_settexthscaling(ctx->pgs, (double)n->value.i);
-    else {
-        if (n->type == PDF_REAL)
-            code = gs_settexthscaling(ctx->pgs, n->value.d);
-        else
-            code = gs_note_error(gs_error_typecheck);
-    }
-    pdfi_pop(ctx, 1);
-    return code;
+    return gs_settexthscaling(ctx->pgs, d);
 }
 
 int pdfi_singlequote(pdf_context *ctx)
@@ -1556,11 +1425,6 @@ int pdfi_singlequote(pdf_context *ctx)
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TEXTOPNOBT, "pdfi_singlequote", NULL);
-    }
-
-    if (pdfi_count_stack(ctx) < 1) {
-        pdfi_clearstack(ctx);
-        return_error(gs_error_stackunderflow);
     }
 
     code = pdfi_T_star(ctx);
@@ -1573,8 +1437,7 @@ int pdfi_singlequote(pdf_context *ctx)
 int pdfi_doublequote(pdf_context *ctx)
 {
     int code;
-    pdf_string *s;
-    pdf_num *Tw, *Tc;
+    double Tw, Tc;
 
     if (ctx->text.BlockDepth == 0) {
         pdfi_set_warning(ctx, 0, NULL, W_PDF_TEXTOPNOBT, "pdfi_T_doublequote", NULL);
@@ -1585,38 +1448,35 @@ int pdfi_doublequote(pdf_context *ctx)
         return_error(gs_error_stackunderflow);
     }
 
-    s = (pdf_string *)ctx->stack_top[-1];
-    Tc = (pdf_num *)ctx->stack_top[-2];
-    Tw = (pdf_num *)ctx->stack_top[-3];
-    if (s->type != PDF_STRING || (Tc->type != PDF_INT && Tc->type != PDF_REAL) ||
-        (Tw->type != PDF_INT && Tw->type != PDF_REAL)) {
+    if (pdfi_type_of(ctx->stack_top[-1]) != PDF_STRING) {
         pdfi_pop(ctx, 3);
         return gs_note_error(gs_error_typecheck);
     }
 
-    if (Tc->type == PDF_INT)
-        code = pdfi_set_Tc(ctx, (double)Tc->value.i);
-    else
-        code = pdfi_set_Tc(ctx, Tc->value.d);
-    if (code < 0) {
-        pdfi_pop(ctx, 3);
-        return code;
-    }
+    code = pdfi_obj_to_real(ctx, ctx->stack_top[-2], &Tc);
+    if (code < 0)
+        goto error;
+    code = pdfi_set_Tc(ctx, Tc);
+    if (code < 0)
+        goto error;
 
-    if (Tw->type == PDF_INT)
-        code = pdfi_set_Tw(ctx, (double)Tw->value.i);
-    else
-        code = pdfi_set_Tw(ctx, Tw->value.d);
-    if (code < 0) {
-        pdfi_pop(ctx, 3);
-        return code;
-    }
+    code = pdfi_obj_to_real(ctx, ctx->stack_top[-3], &Tw);
+    if (code < 0)
+        goto error;
+    code = pdfi_set_Tw(ctx, Tw);
+    if (code < 0)
+        goto error;
 
     code = pdfi_T_star(ctx);
     if (code < 0)
-        return code;
+        goto error;
 
     code = pdfi_Tj(ctx);
+    /* Tj pops one off the stack for us, leaving us 2 to go. */
+    pdfi_pop(ctx, 2);
+    return code;
+
+error:
     pdfi_pop(ctx, 3);
     return code;
 }

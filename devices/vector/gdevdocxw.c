@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Device for creating docx files. */
@@ -38,7 +38,8 @@
 
 #include "doc_common.h"
 
-#include "../../extract/include/extract.h"
+#include "extract/extract.h"
+#include "extract/buffer.h"
 
 #include <errno.h>
 
@@ -103,7 +104,6 @@ typedef struct {
     extract_alloc_t *alloc;
     extract_t *extract;
     int file_per_page;
-    float x;    /* Used to maintain x pos as we iterate through a span. */
 } gx_device_docxwrite_t;
 
 
@@ -178,8 +178,7 @@ const gx_device_docxwrite_t gs_docxwrite_device =
     0,				/* TextFormat */
     NULL,           /* alloc */
     NULL,			/* extract */
-    0,              /* file_per_page */
-    0.0             /* x */
+    0               /* file_per_page */
 };
 
 
@@ -241,6 +240,12 @@ docxwrite_open_device(gx_device * dev)
     gs_parsed_file_name_t parsed;
     int code = 0;
 
+    if (tdev->extract) {
+        /* We can be called multiple times; nothing to do after the first time.
+        */
+        return 0;
+    }
+
     gx_device_fill_in_procs(dev);
     if (tdev->fname[0] == 0)
         return_error(gs_error_undefinedfilename);
@@ -249,6 +254,7 @@ docxwrite_open_device(gx_device * dev)
     dev->color_info.separable_and_linear = GX_CINFO_SEP_LIN;
     set_linear_color_bits_mask_shift(dev);
     dev->interpolate_control = 0;
+    dev->non_strict_bounds = 0;
 
     tdev->alloc = NULL;
     tdev->extract = NULL;
@@ -267,7 +273,8 @@ docxwrite_open_device(gx_device * dev)
         code = s_errno_to_gs();
         goto end;
     }
-    if (extract_page_begin(tdev->extract)) {
+    /* Pass dummy page bbox for now; our simple use of extract ignores it. */
+    if (extract_page_begin(tdev->extract, 0, 0, 0, 0)) {
         code = s_errno_to_gs();
         goto end;
     }
@@ -377,7 +384,8 @@ docxwrite_output_page(gx_device * dev, int num_copies, int flush)
             goto end;
         }
     }
-    if (extract_page_begin(tdev->extract)) {
+    /* Pass dummy page bbox for now; our simple use of extract ignores it. */
+    if (extract_page_begin(tdev->extract, 0, 0, 0, 0)) {
         code = s_errno_to_gs();
         goto end;
     }
@@ -585,6 +593,7 @@ docxwrite_put_params(gx_device * dev, gs_param_list * plist)
     dev->is_open = open;
 
     dev->interpolate_control = 0;
+    dev->non_strict_bounds = 0;
 
     return 0;
 }
@@ -724,11 +733,13 @@ docx_update_text_state(docx_list_entry_t *ppts,
 
     ppts->size = size;
     ppts->matrix = tmat;
-    ppts->FontName = (char *)gs_malloc(pdev->memory->stable_memory, 1,
+    gs_free_object(pdev->memory->non_gc_memory, ppts->FontName, "txtwrite alloc font name");
+    ppts->FontName = (char *)gs_malloc(pdev->memory, 1,
         font->font_name.size + 1, "txtwrite alloc font name");
     if (!ppts->FontName)
         return gs_note_error(gs_error_VMerror);
-    memcpy(ppts->FontName, font->font_name.chars, font->font_name.size + 1);
+    memcpy(ppts->FontName, font->font_name.chars, font->font_name.size);
+    ppts->FontName[font->font_name.size] = 0;
 
     if (font->PaintType == 2 && penum->pgs->text_rendering_mode == 0)
     {
@@ -804,6 +815,7 @@ docxwrite_process_cmap_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
     unsigned int rcode = 0;
     gs_text_enum_t scan = *(gs_text_enum_t *)pte;
     int i;
+    gs_point at = { 0, 0 };
 
     /* Composite font using a CMap */
 
@@ -865,8 +877,13 @@ docxwrite_process_cmap_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
             return code;
         }
         if (!prevFontName && penum->text_state->FontName) {
+            gs_rect *fbbox = &((gs_font_base *)subfont)->FontBBox;
+            gs_matrix fm = *&((gs_font_base *)subfont)->FontMatrix;
+            gs_rect bbox;
 
-            tdev->x = fixed2float(penum->origin.x) - penum->text_state->matrix.tx;
+            code = gs_bbox_transform(fbbox, &fm, &bbox);
+            if (code < 0)
+                return code;
 
             if (extract_span_begin(
                     tdev->extract,
@@ -874,19 +891,15 @@ docxwrite_process_cmap_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
                     0 /*font_bold*/,
                     0 /*font_italic*/,
                     penum->text_state->wmode,
-                    penum->text_state->matrix.xx,
-                    penum->text_state->matrix.xy,
-                    penum->text_state->matrix.yx,
-                    penum->text_state->matrix.yy,
-                    penum->text_state->matrix.tx,
-                    penum->text_state->matrix.ty,
-                    penum->text_state->size,
-                    0.0f,
-                    0.0f,
-                    penum->text_state->size,
-                    0.0f,
-                    0.0f
-                    )) {
+                    penum->pgs->ctm.xx,
+                    penum->pgs->ctm.xy,
+                    penum->pgs->ctm.yx,
+                    penum->pgs->ctm.yy,
+                    bbox.p.x,
+                    bbox.p.y,
+                    bbox.q.x,
+                    bbox.q.y))
+            {
                 return s_errno_to_gs();
             }
         }
@@ -932,19 +945,24 @@ docxwrite_process_cmap_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
 
             txt_get_unicode(penum->dev, (gs_font *)pte->orig_font, glyph, chr, &buffer[0]);
 
+            /* Pass dummy glyph bbox because our use of extract does not
+            currently cause it to be used. */
             if (extract_add_char(
                     tdev->extract,
-                    tdev->x,
-                    fixed2float(penum->origin.y) - penum->text_state->matrix.ty,
+                    penum->text_state->matrix.tx + at.x, penum->text_state->matrix.ty + at.y,
                     buffer[0] /*ucs*/,
                     glyph_width / penum->text_state->size /*adv*/,
-                    0 /*autosplit*/
+                    0, 0, 0, 0 /* bbox*/
                     )) {
                 return s_errno_to_gs();
             }
         }
 
-        tdev->x += widths.real_width.xy.x * penum->text_state->size;
+        gs_distance_transform(widths.real_width.xy.x,
+                              widths.real_width.xy.y,
+                              &ctm_only(pte->pgs), &wanted);
+        at.x += dpt.x + wanted.x;
+        at.y += dpt.y + wanted.y;
 
         if (rcode || pte->index >= pte->text.size)
             break;
@@ -966,10 +984,10 @@ docxwrite_process_plain_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
     uint operation = pte->text.operation;
     txt_glyph_widths_t widths;
     gs_point wanted;	/* user space */
+    gs_point at = { 0, 0 };
 
     for (i=pte->index;i<pte->text.size;i++) {
         const char* prevFontName;
-        float span_delta_x;
         float glyph_width;
         unsigned short chr2[4];
 
@@ -980,7 +998,7 @@ docxwrite_process_plain_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
             ch = pte->text.data.chars[pte->index];
         } else if (operation & (TEXT_FROM_GLYPHS | TEXT_FROM_SINGLE_GLYPH)) {
             if (operation & TEXT_FROM_GLYPHS) {
-                gdata = pte->text.data.glyphs + (pte->index++ * sizeof (gs_glyph));
+                gdata = pte->text.data.glyphs + pte->index++;
             } else {
                 gdata = &pte->text.data.d_glyph;
             }
@@ -1006,8 +1024,13 @@ docxwrite_process_plain_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
             return code;
 
         if (!prevFontName && penum->text_state->FontName) {
+            gs_rect *fbbox = &((gs_font_base *)font)->FontBBox;
+            gs_matrix fm = *&((gs_font_base *)font)->FontMatrix;
+            gs_rect bbox;
 
-            tdev->x = fixed2float(penum->origin.x) - penum->text_state->matrix.tx;
+            code = gs_bbox_transform(fbbox, &fm, &bbox);
+            if (code < 0)
+                return code;
 
             if (extract_span_begin(
                     tdev->extract,
@@ -1015,30 +1038,47 @@ docxwrite_process_plain_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
                     0 /*font_bold*/,
                     0 /*font_italic*/,
                     penum->text_state->wmode,
-                    penum->text_state->matrix.xx,
-                    penum->text_state->matrix.xy,
-                    penum->text_state->matrix.yx,
-                    penum->text_state->matrix.yy,
-                    penum->text_state->matrix.tx,
-                    penum->text_state->matrix.ty,
-                    penum->text_state->size,
-                    0.0f,
-                    0.0f,
-                    penum->text_state->size,
-                    0.0f,
-                    0.0f
-                    )) {
+                    penum->pgs->ctm.xx,
+                    penum->pgs->ctm.xy,
+                    penum->pgs->ctm.yx,
+                    penum->pgs->ctm.yy,
+                    bbox.p.x,
+                    bbox.p.y,
+                    bbox.q.x,
+                    bbox.q.y))
+            {
                 return s_errno_to_gs();
             }
         }
+
+        /* Calculate glyph_width from the **original** glyph metrics, not the overriding
+         * advance width (if TEXT_REPLACE_WIDTHS is set below)
+         */
         txt_char_widths_to_uts(pte->orig_font, &widths); /* convert design->text space */
+        glyph_width = widths.real_width.xy.x * penum->text_state->size;
+
+        if (pte->text.operation & TEXT_REPLACE_WIDTHS)
+        {
+            gs_point tpt;
+
+            /* We are applying a width override, from x/y/xyshow. This could be from
+             * a PostScript file, or it could be from a PDF file where we have a font
+             * with a FontMatrix which is neither horizontal nor vertical.
+             */
+            code = gs_text_replaced_width(&pte->text, pte->xy_index++, &tpt);
+            if (code < 0)
+                return_error(gs_error_unregistered);
+
+            widths.Width.w = widths.real_width.w = tpt.x;
+            widths.Width.xy.x = widths.real_width.xy.x = tpt.x;
+            widths.Width.xy.y = widths.real_width.xy.y = tpt.y;
+        }
+
         gs_distance_transform(widths.real_width.xy.x * penum->text_state->size,
                           widths.real_width.xy.y * penum->text_state->size,
                           &penum->text_state->matrix, &wanted);
         pte->returned.total_width.x += wanted.x;
         pte->returned.total_width.y += wanted.y;
-        span_delta_x = widths.real_width.xy.x * penum->text_state->size;
-        glyph_width = widths.real_width.xy.x * penum->text_state->size;
 
         if (pte->text.operation & TEXT_ADD_TO_ALL_WIDTHS) {
             gs_point tpt;
@@ -1059,24 +1099,29 @@ docxwrite_process_plain_text(gx_device_docxwrite_t *tdev, gs_text_enum_t *pte)
         pte->returned.total_width.x += dpt.x;
         pte->returned.total_width.y += dpt.y;
 
-        span_delta_x += dpt.x;
-
-        code = txt_get_unicode(penum->dev, (gs_font *)pte->orig_font, glyph, ch, &chr2[0]);
+        (void) txt_get_unicode(penum->dev, (gs_font *)pte->orig_font, glyph, ch, &chr2[0]);
         /* If a single text code returned multiple Unicode values, then we need to set the
          * 'extra' code points' widths to 0.
          */
 
+        /* Pass dummy glyph bbox because our use of extract does not currently
+        cause it to be used. */
         if (extract_add_char(
                 tdev->extract,
-                tdev->x,
-                fixed2float(penum->origin.y) - penum->text_state->matrix.ty,
+                penum->text_state->matrix.tx + at.x, penum->text_state->matrix.ty + at.y,
                 chr2[0] /*ucs*/,
                 glyph_width / penum->text_state->size /*adv*/,
-                0 /*autosplit*/
+                0, 0, 0, 0 /*bbox*/
                 )) {
             return s_errno_to_gs();
         }
-        tdev->x += span_delta_x;
+
+        gs_distance_transform(widths.real_width.xy.x,
+                              widths.real_width.xy.y,
+                              &ctm_only(pte->pgs), &wanted);
+        at.x += dpt.x + wanted.x;
+        at.y += dpt.y + wanted.y;
+
         pte->index++;
     }
     code = 0;
@@ -1220,7 +1265,10 @@ textw_text_release(gs_text_enum_t *pte, client_name_t cname)
      * an error.
      */
     if (penum->text_state)
+    {
+        gs_free_object(tdev->memory->non_gc_memory, penum->text_state->FontName, "txtwrite free text state");
         gs_free(tdev->memory, penum->text_state, 1, sizeof(penum->text_state), "txtwrite free text state");
+    }
 
     gs_text_release(NULL, pte, cname);
 }

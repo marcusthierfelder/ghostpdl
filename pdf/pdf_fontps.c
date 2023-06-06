@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* common code for Postscript-type font handling */
@@ -117,30 +117,6 @@ pdf_ps_end_number_object(int c)
     return (c != '.' && c != 'e' && c != '-' && (c < '0' || c > '9'));
 }
 
-static inline bool
-ishex(char c)
-{
-    if (c < 0x30)
-        return false;
-
-    if (c > 0x39) {
-        if (c > 'F') {
-            if (c < 'a')
-                return false;
-            if (c > 'f')
-                return false;
-            return true;
-        }
-        else {
-            if (c < 'A')
-                return false;
-            return true;
-        }
-    }
-    else
-        return true;
-}
-
 static inline int
 decodehex(char c)
 {
@@ -178,7 +154,7 @@ pdfi_pscript_interpret(pdf_ps_ctx_t *cs, byte *pdfpsbuf, int64_t buflen)
                            *pdfpsbuf != char_CR)
                         pdfpsbuf++;
 
-                    if (*pdfpsbuf == char_EOL)
+                    if (pdfpsbuf < buflim && *pdfpsbuf == char_EOL)
                         pdfpsbuf++;
                 }
                 break;
@@ -230,10 +206,16 @@ pdfi_pscript_interpret(pdf_ps_ctx_t *cs, byte *pdfpsbuf, int64_t buflen)
                     for (i = 0; i < len; i += 2) {
                         hbuf[0] = s[i];
                         hbuf[1] = s[i + 1];
+                        if (!ishex(hbuf[0]) || !ishex(hbuf[1])) {
+                            code = gs_note_error(gs_error_typecheck);
+                            break;
+                        }
                         *s2++ = (decodehex(hbuf[0]) << 4) | decodehex(hbuf[1]);
                     }
-                    pdfpsbuf++; /* move past the trailing '>' */
-                    code = pdf_ps_stack_push_string(cs, s, len >> 1);
+                    if (i >= len) {
+                        pdfpsbuf++; /* move past the trailing '>' */
+                        code = pdf_ps_stack_push_string(cs, s, len >> 1);
+                    }
                 }
                 break;
             case '>': /* For hex strings, this should be handled above */
@@ -376,6 +358,29 @@ pdfi_pscript_interpret(pdf_ps_ctx_t *cs, byte *pdfpsbuf, int64_t buflen)
     return code;
 }
 
+static inline bool pdf_ps_name_cmp(pdf_ps_stack_object_t *obj, const char *namestr)
+{
+    byte *d = NULL;
+    int l1, l2;
+
+    if (namestr) {
+        l2 = strlen(namestr);
+    }
+
+    if (obj->type == PDF_PS_OBJ_NAME) {
+        d = obj->val.name;
+        l1 = obj->size;
+    }
+    else if (obj->type == PDF_PS_OBJ_STRING) {
+        d = obj->val.name;
+        l1 = obj->size;
+    }
+    if (d != NULL && namestr != NULL && l1 == l2) {
+        return memcmp(d, namestr, l1) == 0 ? true : false;
+    }
+    return false;
+}
+
 static int
 ps_font_def_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
 {
@@ -387,464 +392,500 @@ ps_font_def_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
     }
 
     if (pdf_ps_obj_has_type(&s->cur[-1], PDF_PS_OBJ_NAME)) {
-        if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("FontName"))) {
-            int fnlen = 0;
-            char *pname = NULL;
+        switch (s->cur[-1].size) {
 
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_NAME)) {
-                fnlen = s->cur[0].size > gs_font_name_max ? gs_font_name_max : s->cur[0].size;
-                pname = (char *)s->cur[0].val.name;
-            }
-            else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_STRING)) {
-                fnlen = s->cur[0].size > gs_font_name_max ? gs_font_name_max : s->cur[0].size;
-                pname = (char *)s->cur[0].val.string;
-            }
-            if (pname) {
-                memcpy(priv->gsu.gst1.key_name.chars, pname, fnlen);
-                priv->gsu.gst1.key_name.chars[fnlen] = '\0';
-                priv->gsu.gst1.key_name.size = fnlen;
+          case 4:
+              if (pdf_ps_name_cmp(&s->cur[-1], "XUID")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, size = s->cur[0].size;
+                      long *xvals = (long *)gs_alloc_bytes(mem, size *sizeof(long), "ps_font_def_func(xuid vals)");
 
-                memcpy(priv->gsu.gst1.font_name.chars, pname, fnlen);
-                priv->gsu.gst1.font_name.chars[fnlen] = '\0';
-                priv->gsu.gst1.font_name.size = fnlen;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("PaintType"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.PaintType = s->cur[0].val.i;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("StrokeWidth"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_FLOAT)) {
-                priv->gsu.gst1.StrokeWidth = s->cur[0].val.f;
-            }
-            else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.StrokeWidth = (float)s->cur[0].val.i;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("WMode"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.WMode = s->cur[0].val.i;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("lenIV"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.data.lenIV = s->cur[0].val.i;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("UniqueID"))) {
-            /* Ignore UniqueID if we already have a XUID */
-            if (priv->gsu.gst1.UID.id >= 0) {
-                if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                    uid_set_UniqueID(&priv->gsu.gst1.UID, s->cur[0].val.i);
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("XUID"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, size = s->cur[0].size;
-                long *xvals = (long *)gs_alloc_bytes(mem, size *sizeof(long), "ps_font_def_func(xuid vals)");
+                      if (xvals != NULL) {
+                          for (i = 0; i < size; i++) {
+                              if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                                  xvals[i] = s->cur[0].val.arr[i].val.i;
+                              }
+                              else {
+                                  gs_free_object(mem, xvals, "ps_font_def_func(xuid vals)");
+                                  xvals = NULL;
+                                  break;
+                              }
+                          }
+                      }
+                      if (xvals != NULL) {
+                          if (priv->gsu.gst1.UID.xvalues != NULL)
+                              gs_free_object(mem, priv->gsu.gst1.UID.xvalues, "ps_font_def_func(old xuid vals)");
+                          uid_set_XUID(&priv->gsu.gst1.UID, xvals, size);
+                      }
+                  }
+              }
+              break;
 
-                if (xvals != NULL) {
-                    for (i = 0; i < size; i++) {
-                        if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                            xvals[i] = s->cur[0].val.arr[i].val.i;
-                        }
-                        else {
-                            gs_free_object(mem, xvals, "ps_font_def_func(xuid vals)");
-                            xvals = NULL;
-                            break;
-                        }
-                    }
-                }
-                if (xvals != NULL) {
-                    if (priv->gsu.gst1.UID.xvalues != NULL)
-                        gs_free_object(mem, priv->gsu.gst1.UID.xvalues, "ps_font_def_func(old xuid vals)");
-                    uid_set_XUID(&priv->gsu.gst1.UID, xvals, size);
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("FontBBox"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, j;
-                double bbox[4] = { 0, 0, 1000, 1000 };
-                if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_ARRAY)) { /* This is (probably) a Blend/FontBBox entry */
-                    code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blendfontbbox);
-                    if (code >= 0) {
-                        pdfi_countup(priv->u.t1.blendfontbbox);
-                        for (i = 0; i < s->cur[0].size; i++) {
-                            pdf_ps_stack_object_t *arr = &s->cur[0].val.arr[i];
-                            pdf_array *parr;
-                            pdf_num *n;
-                            if (pdf_ps_obj_has_type(arr, PDF_PS_OBJ_ARRAY)) {
-                                code = pdfi_array_alloc(s->pdfi_ctx, arr->size, &parr);
-                                if (code < 0)
-                                    break;
-                                pdfi_countup(parr);
+          case 5:
+              if (pdf_ps_name_cmp(&s->cur[-1], "StdHW")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY) && s->cur[0].size > 0) {
+                      if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_INTEGER)) {
+                          priv->gsu.gst1.data.StdHW.values[0] = (float)s->cur[0].val.arr[0].val.i;
+                          priv->gsu.gst1.data.StdHW.count = 1;
+                      }
+                      else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_FLOAT)) {
+                          priv->gsu.gst1.data.StdHW.values[0] = s->cur[0].val.arr[0].val.f;
+                          priv->gsu.gst1.data.StdHW.count = 1;
+                      }
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "StdVW")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY) && s->cur[0].size > 0) {
+                      if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_INTEGER)) {
+                          priv->gsu.gst1.data.StdVW.values[0] = (float)s->cur[0].val.arr[0].val.i;
+                          priv->gsu.gst1.data.StdVW.count = 1;
+                      }
+                      else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_FLOAT)) {
+                          priv->gsu.gst1.data.StdVW.values[0] = s->cur[0].val.arr[0].val.f;
+                          priv->gsu.gst1.data.StdVW.count = 1;
+                      }
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "WMode")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      if (s->cur[0].val.i != 0) {
+                          if (s->cur[0].val.i != 1)
+                            pdfi_set_warning(s->pdfi_ctx, 0, NULL, W_PDF_BAD_WMODE, "ps_font_def_func", NULL);
+                        priv->gsu.gst1.WMode = 1;
+                      }
+                      else
+                        priv->gsu.gst1.WMode = 0;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "lenIV")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      priv->gsu.gst1.data.lenIV = s->cur[0].val.i;
+                  }
+              }
+              break;
 
-                                for (j = 0; j < arr->size; j++) {
-                                    if (pdf_ps_obj_has_type(&arr->val.arr[j], PDF_PS_OBJ_INTEGER)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = arr->val.arr[j].val.i;
-                                    }
-                                    else if (pdf_ps_obj_has_type(&arr->val.arr[j], PDF_PS_OBJ_FLOAT)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.d = arr->val.arr[j].val.f;
-                                    }
-                                    else {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = 0;
-                                    }
-                                    if (code < 0)
-                                        break;
-                                    pdfi_countup(n);
-                                    code = pdfi_array_put(s->pdfi_ctx, parr, j, (pdf_obj *)n);
-                                    pdfi_countdown(n);
-                                    if (code < 0) break;
-                                }
-                            }
-                            if (code >= 0)
-                                code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blendfontbbox, i, (pdf_obj *)parr);
-                            pdfi_countdown(parr);
-                        }
-                    }
-                }
-                else if (s->cur[0].size >= 4) {
-                    for (i = 0; i < 4; i++) {
-                        if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                            bbox[i] = (double)s->cur[0].val.arr[i].val.i;
-                        }
-                        else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                            bbox[i] = (double)s->cur[0].val.arr[i].val.f;
-                        }
-                    }
-                    priv->gsu.gst1.FontBBox.p.x = bbox[0];
-                    priv->gsu.gst1.FontBBox.p.y = bbox[1];
-                    priv->gsu.gst1.FontBBox.q.x = bbox[2];
-                    priv->gsu.gst1.FontBBox.q.y = bbox[3];
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("FontType"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.FontType = s->cur[0].val.i;
-                priv->u.t1.pdfi_font_type = s->cur[0].val.i == 1 ? e_pdf_font_type1 : e_pdf_cidfont_type0;
-            }
-            else {
-                priv->gsu.gst1.FontType = 1;
-                priv->u.t1.pdfi_font_type = e_pdf_font_type1;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("FontMatrix"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY) && s->cur[0].size >= 6) {
-                int i;
-                double fmat[6] = { 0.001, 0, 0, 0.001, 0, 0 };
-                for (i = 0; i < 6; i++) {
-                    if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                        fmat[i] = (double)s->cur[0].val.arr[i].val.i;
-                    }
-                    else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                        fmat[i] = (double)s->cur[0].val.arr[i].val.f;
-                    }
-                }
-                priv->gsu.gst1.FontMatrix.xx = fmat[0];
-                priv->gsu.gst1.FontMatrix.xy = fmat[1];
-                priv->gsu.gst1.FontMatrix.yx = fmat[2];
-                priv->gsu.gst1.FontMatrix.yy = fmat[3];
-                priv->gsu.gst1.FontMatrix.tx = fmat[4];
-                priv->gsu.gst1.FontMatrix.ty = fmat[5];
-                priv->gsu.gst1.orig_FontMatrix = priv->gsu.gst1.FontMatrix;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("BlueValues"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, size = s->cur[0].size < 14 ? s->cur[0].size : 14;
+          case 8:
+              if (pdf_ps_name_cmp(&s->cur[-1], "FontName")) {
+                  int fnlen = 0;
+                  char *pname = NULL;
 
-                for (i = 0; i < size; i++) {
-                    if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                        priv->gsu.gst1.data.BlueValues.values[i] =
-                            (float)s->cur[0].val.arr[i].val.i;
-                    }
-                    else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                        priv->gsu.gst1.data.BlueValues.values[i] = s->cur[0].val.arr[i].val.f;
-                    }
-                    else {
-                        if (i == 0)
-                            priv->gsu.gst1.data.BlueValues.values[i] = 0;
-                        else
-                            priv->gsu.gst1.data.BlueValues.values[i] = priv->gsu.gst1.data.BlueValues.values[i - 1] + 1;
-                    }
-                }
-                priv->gsu.gst1.data.BlueValues.count = size;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("BlueScale"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                priv->gsu.gst1.data.BlueScale = (float)s->cur[0].val.i;
-            }
-            else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_FLOAT)) {
-                priv->gsu.gst1.data.BlueScale = (float)s->cur[0].val.f;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("StdHW"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_INTEGER)) {
-                    priv->gsu.gst1.data.StdHW.values[0] = (float)s->cur[0].val.arr[0].val.i;
-                    priv->gsu.gst1.data.StdHW.count = 1;
-                }
-                else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_FLOAT)) {
-                    priv->gsu.gst1.data.StdHW.values[0] = s->cur[0].val.arr[0].val.f;
-                    priv->gsu.gst1.data.StdHW.count = 1;
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("StdVW"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_INTEGER)) {
-                    priv->gsu.gst1.data.StdVW.values[0] = (float)s->cur[0].val.arr[0].val.i;
-                    priv->gsu.gst1.data.StdVW.count = 1;
-                }
-                else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_FLOAT)) {
-                    priv->gsu.gst1.data.StdVW.values[0] = s->cur[0].val.arr[0].val.f;
-                    priv->gsu.gst1.data.StdVW.count = 1;
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("StemSnapH"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, size = s->cur[0].size > 12 ? 12 : s->cur[0].size;
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_NAME)) {
+                      fnlen = s->cur[0].size > gs_font_name_max ? gs_font_name_max : s->cur[0].size;
+                      pname = (char *)s->cur[0].val.name;
+                  }
+                  else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_STRING)) {
+                      fnlen = s->cur[0].size > gs_font_name_max ? gs_font_name_max : s->cur[0].size;
+                      pname = (char *)s->cur[0].val.string;
+                  }
+                  if (pname) {
+                      memcpy(priv->gsu.gst1.key_name.chars, pname, fnlen);
+                      priv->gsu.gst1.key_name.chars[fnlen] = '\0';
+                      priv->gsu.gst1.key_name.size = fnlen;
 
-                for (i = 0; i < size; i++) {
-                    if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                        priv->gsu.gst1.data.StemSnapH.values[i] = (float)s->cur[0].val.arr[i].val.i;
-                    }
-                    else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                        priv->gsu.gst1.data.StemSnapH.values[i] = s->cur[0].val.arr[i].val.f;
-                    }
-                }
-                priv->gsu.gst1.data.StemSnapH.count = size;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("StemSnapV"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, size = s->cur[0].size > 12 ? 12 : s->cur[0].size;
+                      memcpy(priv->gsu.gst1.font_name.chars, pname, fnlen);
+                      priv->gsu.gst1.font_name.chars[fnlen] = '\0';
+                      priv->gsu.gst1.font_name.size = fnlen;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "FontBBox")) {
+                  if (s->cur[0].size > 0 && pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, j;
+                      double bbox[4] = { 0, 0, 1000, 1000 };
+                      if (pdf_ps_obj_has_type(&s->cur[0].val.arr[0], PDF_PS_OBJ_ARRAY)) { /* This is (probably) a Blend/FontBBox entry */
+                          code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blendfontbbox);
+                          if (code >= 0) {
+                              pdfi_countup(priv->u.t1.blendfontbbox);
+                              for (i = 0; i < s->cur[0].size; i++) {
+                                  pdf_ps_stack_object_t *arr = &s->cur[0].val.arr[i];
+                                  pdf_array *parr = NULL;
+                                  pdf_num *n;
+                                  if (pdf_ps_obj_has_type(arr, PDF_PS_OBJ_ARRAY)) {
+                                      code = pdfi_array_alloc(s->pdfi_ctx, arr->size, &parr);
+                                      if (code < 0)
+                                          break;
+                                      pdfi_countup(parr);
 
-                for (i = 0; i < size; i++) {
-                    if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                        priv->gsu.gst1.data.StemSnapV.values[i] = (float)s->cur[0].val.arr[i].val.i;
-                    }
-                    else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                        priv->gsu.gst1.data.StemSnapV.values[i] = s->cur[0].val.arr[i].val.f;
-                    }
-                }
-                priv->gsu.gst1.data.StemSnapH.count = size;
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("Encoding"))) {
-            pdf_array *new_enc = NULL;
+                                      for (j = 0; j < arr->size; j++) {
+                                          if (pdf_ps_obj_has_type(&arr->val.arr[j], PDF_PS_OBJ_INTEGER)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = arr->val.arr[j].val.i;
+                                          }
+                                          else if (pdf_ps_obj_has_type(&arr->val.arr[j], PDF_PS_OBJ_FLOAT)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.d = arr->val.arr[j].val.f;
+                                          }
+                                          else {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = 0;
+                                          }
+                                          if (code < 0)
+                                              break;
+                                          pdfi_countup(n);
+                                          code = pdfi_array_put(s->pdfi_ctx, parr, j, (pdf_obj *)n);
+                                          pdfi_countdown(n);
+                                          if (code < 0) break;
+                                      }
+                                  }
+                                  if (code >= 0)
+                                      code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blendfontbbox, i, (pdf_obj *)parr);
+                                  pdfi_countdown(parr);
+                              }
+                          }
+                      }
+                      else if (s->cur[0].size >= 4) {
+                          for (i = 0; i < 4; i++) {
+                              if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                                  bbox[i] = (double)s->cur[0].val.arr[i].val.i;
+                              }
+                              else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                                  bbox[i] = (double)s->cur[0].val.arr[i].val.f;
+                              }
+                          }
+                          priv->gsu.gst1.FontBBox.p.x = bbox[0];
+                          priv->gsu.gst1.FontBBox.p.y = bbox[1];
+                          priv->gsu.gst1.FontBBox.q.x = bbox[2];
+                          priv->gsu.gst1.FontBBox.q.y = bbox[3];
+                      }
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "FontType")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      priv->gsu.gst1.FontType = s->cur[0].val.i;
+                      priv->u.t1.pdfi_font_type = s->cur[0].val.i == 1 ? e_pdf_font_type1 : e_pdf_cidfont_type0;
+                  }
+                  else {
+                      priv->gsu.gst1.FontType = 1;
+                      priv->u.t1.pdfi_font_type = e_pdf_font_type1;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "Encoding")) {
+                  pdf_array *new_enc = NULL;
 
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_NAME)) {
-                pdf_name *pname;
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_NAME)) {
+                      pdf_name *pname;
 
-                code = pdfi_name_alloc(s->pdfi_ctx, (byte *) s->cur[0].val.name, s->cur[0].size, (pdf_obj **) &pname);
-                if (code >= 0) {
-                    pdfi_countup(pname);
+                      code = pdfi_name_alloc(s->pdfi_ctx, (byte *) s->cur[0].val.name, s->cur[0].size, (pdf_obj **) &pname);
+                      if (code >= 0) {
+                          pdfi_countup(pname);
 
-                    code = pdfi_create_Encoding(s->pdfi_ctx, (pdf_obj *) pname, NULL, (pdf_obj **) &new_enc);
-                    if (code >= 0) {
-                        pdfi_countdown(priv->u.t1.Encoding);
-                        priv->u.t1.Encoding = new_enc;
-                    }
-                    pdfi_countdown(pname);
-                }
-            }
-            else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i;
+                          code = pdfi_create_Encoding(s->pdfi_ctx, (pdf_obj *) pname, NULL, (pdf_obj **) &new_enc);
+                          if (code >= 0) {
+                              pdfi_countdown(priv->u.t1.Encoding);
+                              priv->u.t1.Encoding = new_enc;
+                          }
+                          pdfi_countdown(pname);
+                      }
+                  }
+                  else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i;
 
-                code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &new_enc);
-                if (code >= 0) {
-                    pdfi_countup(new_enc);
-                    for (i = 0; i < s->cur[0].size; i++) {
-                        pdf_name *n = NULL;
-                        byte *nm = (byte *) s->cur[0].val.arr[i].val.name;
-                        int nlen = s->cur[0].val.arr[i].size;
+                      code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &new_enc);
+                      if (code >= 0) {
+                          pdfi_countup(new_enc);
+                          for (i = 0; i < s->cur[0].size; i++) {
+                              pdf_name *n = NULL;
+                              byte *nm = (byte *) s->cur[0].val.arr[i].val.name;
+                              int nlen = s->cur[0].val.arr[i].size;
 
-                        code = pdfi_name_alloc(s->pdfi_ctx, (byte *) nm, nlen, (pdf_obj **) &n);
-                        if (code < 0)
-                            break;
-                        pdfi_countup(n);
-                        code = pdfi_array_put(s->pdfi_ctx, new_enc, (uint64_t) i, (pdf_obj *) n);
-                        pdfi_countdown(n);
-                        if (code < 0)
-                            break;
-                    }
-                    if (code < 0) {
-                        pdfi_countdown(new_enc);
-                    }
-                    else {
-                        pdfi_countdown(priv->u.t1.Encoding);
-                        priv->u.t1.Encoding = new_enc;
-                        new_enc = NULL;
-                    }
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("BlendDesignPositions"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blenddesignpositions);
-                if (code >= 0) {
-                    int i, j;
-                    pdfi_countup(priv->u.t1.blenddesignpositions);
+                              code = pdfi_name_alloc(s->pdfi_ctx, (byte *) nm, nlen, (pdf_obj **) &n);
+                              if (code < 0)
+                                  break;
+                              pdfi_countup(n);
+                              code = pdfi_array_put(s->pdfi_ctx, new_enc, (uint64_t) i, (pdf_obj *) n);
+                              pdfi_countdown(n);
+                              if (code < 0)
+                                  break;
+                          }
+                          if (code < 0) {
+                              pdfi_countdown(new_enc);
+                          }
+                          else {
+                              pdfi_countdown(priv->u.t1.Encoding);
+                              priv->u.t1.Encoding = new_enc;
+                              new_enc = NULL;
+                          }
+                      }
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "UniqueID")) {
+                  /* Ignore UniqueID if we already have a XUID */
+                  if (priv->gsu.gst1.UID.id >= 0) {
+                      if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                          uid_set_UniqueID(&priv->gsu.gst1.UID, s->cur[0].val.i);
+                      }
+                  }
+              }
+              break;
 
-                    for (i = 0; i < s->cur[0].size && code >= 0; i++) {
-                        pdf_ps_stack_object_t *so = &s->cur[0].val.arr[i];
+          case 9:
+              if (pdf_ps_name_cmp(&s->cur[-1], "PaintType")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      priv->gsu.gst1.PaintType = s->cur[0].val.i;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "StemSnapH")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, size = s->cur[0].size > 12 ? 12 : s->cur[0].size;
 
-                        if (pdf_ps_obj_has_type(so, PDF_PS_OBJ_ARRAY)) {
-                            pdf_array *sa;
-                            code = pdfi_array_alloc(s->pdfi_ctx, so->size, &sa);
-                            if (code >= 0) {
-                                pdfi_countup(sa);
-                                for (j = 0; j < so->size; j++) {
-                                    pdf_num *n;
-                                    if (pdf_ps_obj_has_type(&so->val.arr[j], PDF_PS_OBJ_INTEGER)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = so->val.arr[j].val.i;
-                                    }
-                                    else if (pdf_ps_obj_has_type(&so->val.arr[j], PDF_PS_OBJ_FLOAT)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.d = so->val.arr[j].val.f;
-                                    }
-                                    else {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = 0;
-                                    }
-                                    if (code < 0)
-                                        break;
-                                    pdfi_countup(n);
-                                    code = pdfi_array_put(s->pdfi_ctx, sa, j, (pdf_obj *)n);
-                                    pdfi_countdown(n);
-                                    if (code < 0) break;
-                                }
-                            }
-                            if (code >= 0) {
-                                pdfi_array_put(s->pdfi_ctx, priv->u.t1.blenddesignpositions, i, (pdf_obj *)sa);
-                            }
-                            pdfi_countdown(sa);
-                        }
-                    }
-                }
+                      for (i = 0; i < size; i++) {
+                          if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                              priv->gsu.gst1.data.StemSnapH.values[i] = (float)s->cur[0].val.arr[i].val.i;
+                          }
+                          else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                              priv->gsu.gst1.data.StemSnapH.values[i] = s->cur[0].val.arr[i].val.f;
+                          }
+                      }
+                      priv->gsu.gst1.data.StemSnapH.count = size;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "StemSnapV")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, size = s->cur[0].size > 12 ? 12 : s->cur[0].size;
 
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("BlendAxisTypes"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i;
-                code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blendaxistypes);
-                if (code >= 0) {
-                    pdfi_countup(priv->u.t1.blendaxistypes);
-                    for (i = 0; i < s->cur[0].size; i++) {
-                        pdf_ps_stack_object_t *so = &s->cur[0].val.arr[i];
-                        pdf_name *n;
-                        if (pdf_ps_obj_has_type(so, PDF_PS_OBJ_NAME)) {
-                            code = pdfi_object_alloc(s->pdfi_ctx, PDF_NAME, so->size, (pdf_obj **)&n);
-                            if (code >= 0) {
-                                pdfi_countup(n);
-                                memcpy(n->data, so->val.name, so->size);
-                                n->length = so->size;
-                                code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blendaxistypes, i, (pdf_obj *)n);
-                                pdfi_countdown(n);
-                            }
-                        }
-                        if (code < 0)
-                            break;
-                    }
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("BlendDesignMap"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i, j, k;
-                pdf_ps_stack_object_t *arr1 = &s->cur[0], *arr2, *arr3;
-                pdf_array *parr2, *parr3;
-                code = pdfi_array_alloc(s->pdfi_ctx, arr1->size, &priv->u.t1.blenddesignmap);
-                if (code >= 0) {
-                    pdfi_countup(priv->u.t1.blenddesignmap);
-                    for (i = 0; i < arr1->size && code >= 0; i++) {
-                        if (pdf_ps_obj_has_type(&arr1->val.arr[i], PDF_PS_OBJ_ARRAY)) {
-                            arr2 = &arr1->val.arr[i];
-                            code = pdfi_array_alloc(s->pdfi_ctx, arr2->size, &parr2);
-                            if (code < 0)
-                                break;
-                            for (j = 0; j < arr2->size; j++) {
-                                pdf_num *n;
+                      for (i = 0; i < size; i++) {
+                          if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                              priv->gsu.gst1.data.StemSnapV.values[i] = (float)s->cur[0].val.arr[i].val.i;
+                          }
+                          else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                              priv->gsu.gst1.data.StemSnapV.values[i] = s->cur[0].val.arr[i].val.f;
+                          }
+                      }
+                      priv->gsu.gst1.data.StemSnapH.count = size;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "BlueScale")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      priv->gsu.gst1.data.BlueScale = (float)s->cur[0].val.i;
+                  }
+                  else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_FLOAT)) {
+                      priv->gsu.gst1.data.BlueScale = (float)s->cur[0].val.f;
+                  }
+              }
+              break;
 
-                                arr3 = &arr2->val.arr[j];
-                                code = pdfi_array_alloc(s->pdfi_ctx, arr3->size, &parr3);
-                                if (code < 0)
-                                    break;
+          case 10:
+              if (pdf_ps_name_cmp(&s->cur[-1], "FontMatrix")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY) && s->cur[0].size >= 6) {
+                      int i;
+                      double fmat[6] = { 0.001, 0, 0, 0.001, 0, 0 };
+                      for (i = 0; i < 6; i++) {
+                          if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                              fmat[i] = (double)s->cur[0].val.arr[i].val.i;
+                          }
+                          else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                              fmat[i] = (double)s->cur[0].val.arr[i].val.f;
+                          }
+                      }
+                      priv->gsu.gst1.FontMatrix.xx = fmat[0];
+                      priv->gsu.gst1.FontMatrix.xy = fmat[1];
+                      priv->gsu.gst1.FontMatrix.yx = fmat[2];
+                      priv->gsu.gst1.FontMatrix.yy = fmat[3];
+                      priv->gsu.gst1.FontMatrix.tx = fmat[4];
+                      priv->gsu.gst1.FontMatrix.ty = fmat[5];
+                      priv->gsu.gst1.orig_FontMatrix = priv->gsu.gst1.FontMatrix;
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "BlueValues")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, size = s->cur[0].size < 14 ? s->cur[0].size : 14;
 
-                                for (k = 0; k < arr3->size; k++) {
-                                    if (pdf_ps_obj_has_type(&arr3->val.arr[k], PDF_PS_OBJ_INTEGER)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = arr3->val.arr[k].val.i;
-                                    }
-                                    else if (pdf_ps_obj_has_type(&arr1->val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.d = arr3->val.arr[k].val.f;
-                                    }
-                                    else {
-                                        code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
-                                        if (code >= 0)
-                                            n->value.i = 0;
-                                    }
-                                    if (code < 0)
-                                        break;
-                                    pdfi_countup(n);
-                                    code = pdfi_array_put(s->pdfi_ctx, parr3, k, (pdf_obj *)n);
-                                    pdfi_countdown(n);
-                                    if (code < 0)
-                                        break;
-                                }
-                                if (code < 0)
-                                    break;
-                                pdfi_countup(parr3);
-                                code = pdfi_array_put(s->pdfi_ctx, parr2, j, (pdf_obj *)parr3);
-                                pdfi_countdown(parr3);
-                            }
-                            if (code < 0)
-                                break;
-                            pdfi_countup(parr2);
-                            code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blenddesignmap, i, (pdf_obj *)parr2);
-                            pdfi_countdown(parr2);
-                        }
-                    }
-                }
-            }
-        }
-        else if (!memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("WeightVector"))) {
-            if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
-                int i;
-                for (i = 0; i < s->cur[0].size; i++) {
-                    if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
-                        priv->gsu.gst1.data.WeightVector.values[i] = (float)s->cur[0].val.arr[i].val.i;
-                    }
-                    else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
-                        priv->gsu.gst1.data.WeightVector.values[i] = s->cur[0].val.arr[i].val.f;
-                    }
-                    else {
-                        priv->gsu.gst1.data.WeightVector.values[i] = 0;
-                    }
-                }
-                priv->gsu.gst1.data.WeightVector.count = s->cur[0].size;
-            }
+                      for (i = 0; i < size; i++) {
+                          if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                              priv->gsu.gst1.data.BlueValues.values[i] =
+                                  (float)s->cur[0].val.arr[i].val.i;
+                          }
+                          else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                              priv->gsu.gst1.data.BlueValues.values[i] = s->cur[0].val.arr[i].val.f;
+                          }
+                          else {
+                              if (i == 0)
+                                  priv->gsu.gst1.data.BlueValues.values[i] = 0;
+                              else
+                                  priv->gsu.gst1.data.BlueValues.values[i] = priv->gsu.gst1.data.BlueValues.values[i - 1] + 1;
+                          }
+                      }
+                      priv->gsu.gst1.data.BlueValues.count = size;
+                  }
+              }
+              break;
+
+          case 11:
+              if (pdf_ps_name_cmp(&s->cur[-1], "StrokeWidth")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_FLOAT)) {
+                      priv->gsu.gst1.StrokeWidth = s->cur[0].val.f;
+                  }
+                  else if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
+                      priv->gsu.gst1.StrokeWidth = (float)s->cur[0].val.i;
+                  }
+              }
+              break;
+          case 12:
+              if (pdf_ps_name_cmp(&s->cur[-1], "WeightVector")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i;
+                      for (i = 0; i < s->cur[0].size; i++) {
+                          if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_INTEGER)) {
+                              priv->gsu.gst1.data.WeightVector.values[i] = (float)s->cur[0].val.arr[i].val.i;
+                          }
+                          else if (pdf_ps_obj_has_type(&s->cur[0].val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                              priv->gsu.gst1.data.WeightVector.values[i] = s->cur[0].val.arr[i].val.f;
+                          }
+                          else {
+                              priv->gsu.gst1.data.WeightVector.values[i] = 0;
+                          }
+                      }
+                      priv->gsu.gst1.data.WeightVector.count = s->cur[0].size;
+                  }
+              }
+              break;
+          case 14:
+              if (pdf_ps_name_cmp(&s->cur[-1], "BlendAxisTypes")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i;
+                      code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blendaxistypes);
+                      if (code >= 0) {
+                          pdfi_countup(priv->u.t1.blendaxistypes);
+                          for (i = 0; i < s->cur[0].size; i++) {
+                              pdf_ps_stack_object_t *so = &s->cur[0].val.arr[i];
+                              pdf_name *n;
+                              if (pdf_ps_obj_has_type(so, PDF_PS_OBJ_NAME)) {
+                                  code = pdfi_object_alloc(s->pdfi_ctx, PDF_NAME, so->size, (pdf_obj **)&n);
+                                  if (code >= 0) {
+                                      pdfi_countup(n);
+                                      memcpy(n->data, so->val.name, so->size);
+                                      n->length = so->size;
+                                      code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blendaxistypes, i, (pdf_obj *)n);
+                                      pdfi_countdown(n);
+                                  }
+                              }
+                              if (code < 0)
+                                  break;
+                          }
+                      }
+                  }
+              }
+              else if (pdf_ps_name_cmp(&s->cur[-1], "BlendDesignMap")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      int i, j, k;
+                      pdf_ps_stack_object_t *arr1 = &s->cur[0], *arr2, *arr3;
+                      pdf_array *parr2, *parr3;
+                      code = pdfi_array_alloc(s->pdfi_ctx, arr1->size, &priv->u.t1.blenddesignmap);
+                      if (code >= 0) {
+                          pdfi_countup(priv->u.t1.blenddesignmap);
+                          for (i = 0; i < arr1->size && code >= 0; i++) {
+                              if (pdf_ps_obj_has_type(&arr1->val.arr[i], PDF_PS_OBJ_ARRAY)) {
+                                  arr2 = &arr1->val.arr[i];
+                                  code = pdfi_array_alloc(s->pdfi_ctx, arr2->size, &parr2);
+                                  if (code < 0)
+                                      break;
+                                  for (j = 0; j < arr2->size; j++) {
+                                      pdf_num *n;
+
+                                      arr3 = &arr2->val.arr[j];
+                                      code = pdfi_array_alloc(s->pdfi_ctx, arr3->size, &parr3);
+                                      if (code < 0)
+                                          break;
+
+                                      for (k = 0; k < arr3->size; k++) {
+                                          if (pdf_ps_obj_has_type(&arr3->val.arr[k], PDF_PS_OBJ_INTEGER)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = arr3->val.arr[k].val.i;
+                                          }
+                                          else if (pdf_ps_obj_has_type(&arr1->val.arr[i], PDF_PS_OBJ_FLOAT)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.d = arr3->val.arr[k].val.f;
+                                          }
+                                          else {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = 0;
+                                          }
+                                          if (code < 0)
+                                              break;
+                                          pdfi_countup(n);
+                                          code = pdfi_array_put(s->pdfi_ctx, parr3, k, (pdf_obj *)n);
+                                          pdfi_countdown(n);
+                                          if (code < 0)
+                                              break;
+                                      }
+                                      if (code < 0)
+                                          break;
+                                      pdfi_countup(parr3);
+                                      code = pdfi_array_put(s->pdfi_ctx, parr2, j, (pdf_obj *)parr3);
+                                      pdfi_countdown(parr3);
+                                  }
+                                  if (code < 0)
+                                      break;
+                                  pdfi_countup(parr2);
+                                  code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blenddesignmap, i, (pdf_obj *)parr2);
+                                  pdfi_countdown(parr2);
+                              }
+                          }
+                      }
+                  }
+              }
+              break;
+
+          case 20:
+              if (pdf_ps_name_cmp(&s->cur[-1], "BlendDesignPositions")) {
+                  if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_ARRAY)) {
+                      code = pdfi_array_alloc(s->pdfi_ctx, s->cur[0].size, &priv->u.t1.blenddesignpositions);
+                      if (code >= 0) {
+                          int i, j;
+                          pdfi_countup(priv->u.t1.blenddesignpositions);
+
+                          for (i = 0; i < s->cur[0].size && code >= 0; i++) {
+                              pdf_ps_stack_object_t *so = &s->cur[0].val.arr[i];
+
+                              if (pdf_ps_obj_has_type(so, PDF_PS_OBJ_ARRAY)) {
+                                  pdf_array *sa;
+                                  code = pdfi_array_alloc(s->pdfi_ctx, so->size, &sa);
+                                  if (code >= 0) {
+                                      pdfi_countup(sa);
+                                      for (j = 0; j < so->size; j++) {
+                                          pdf_num *n;
+                                          if (pdf_ps_obj_has_type(&so->val.arr[j], PDF_PS_OBJ_INTEGER)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = so->val.arr[j].val.i;
+                                          }
+                                          else if (pdf_ps_obj_has_type(&so->val.arr[j], PDF_PS_OBJ_FLOAT)) {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_REAL, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.d = so->val.arr[j].val.f;
+                                          }
+                                          else {
+                                              code = pdfi_object_alloc(s->pdfi_ctx, PDF_INT, 0, (pdf_obj **)&n);
+                                              if (code >= 0)
+                                                  n->value.i = 0;
+                                          }
+                                          if (code < 0)
+                                              break;
+                                          pdfi_countup(n);
+                                          code = pdfi_array_put(s->pdfi_ctx, sa, j, (pdf_obj *)n);
+                                          pdfi_countdown(n);
+                                          if (code < 0) break;
+                                      }
+                                  }
+                                  if (code >= 0) {
+                                      code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.blenddesignpositions, i, (pdf_obj *)sa);
+                                  }
+                                  pdfi_countdown(sa);
+                              }
+                          }
+                      }
+
+                  }
+              }
+              break;
+
+          default:
+              break;
         }
     }
 
@@ -956,6 +997,10 @@ ps_font_eexec_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
     stream *strm;
     int c;
 
+    if (bufend <= buf) {
+        return_error(gs_error_invalidfont);
+    }
+
     strm = push_eexec_filter(mem, buf, bufend);
     while (1) {
         c = sgetc(strm);
@@ -988,21 +1033,14 @@ ps_font_array_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
         !memcmp(s->cur[-1].val.name, PDF_PS_OPER_NAME_AND_LEN("Subrs"))) {
 
         if (s->cur[0].val.i > 0) {
-            if (priv->u.t1.Subrs != NULL) {
-                int i;
-                for (i = 0; i < priv->u.t1.NumSubrs; i++) {
-                    gs_free_object(mem, priv->u.t1.Subrs[i].data, "ps_font_array_func(Subrs[i])");
-                }
-                gs_free_object(mem, priv->u.t1.Subrs, "ps_font_array_func(Subrs)");
-            }
+            pdfi_countdown(priv->u.t1.Subrs);
 
-            priv->u.t1.Subrs = (gs_string *) gs_alloc_bytes(mem, s->cur[0].val.i *sizeof(gs_string), "ps_font_array_func(Subrs)");
-            if (priv->u.t1.Subrs == NULL) {
-                return_error(gs_error_VMerror);
+            code = pdfi_object_alloc(s->pdfi_ctx, PDF_ARRAY, (unsigned int)s->cur[0].val.i, (pdf_obj **)&priv->u.t1.Subrs);
+            if (code < 0) {
+                return code;
             }
-            memset(priv->u.t1.Subrs, 0x00, s->cur[0].val.i * sizeof(gs_string));
+            pdfi_countup(priv->u.t1.Subrs);
         }
-        priv->u.t1.NumSubrs = s->cur[0].val.i;
         code = pdf_ps_stack_pop(s, 1);
     }
     else if (pdf_ps_obj_has_type(&s->cur[-1], PDF_PS_OBJ_NAME) &&
@@ -1105,14 +1143,18 @@ pdf_ps_RD_oper_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
                 size = s->cur[0].val.i;
                 buf++;
                 if (buf + size < bufend) {
-                    priv->u.t1.Subrs[inx].data =
-                        gs_alloc_bytes(mem, size, "pdf_ps_RD_oper_func(subr string)");
-                    if (priv->u.t1.Subrs[inx].data == NULL) {
-                        (void)pdf_ps_stack_pop(s, 2);
-                        return_error(gs_error_VMerror);
+                    pdf_string *subr_str;
+
+                    code = pdfi_object_alloc(s->pdfi_ctx, PDF_STRING, (unsigned int)size, (pdf_obj **)&subr_str);
+                    if (code < 0) {
+                        return code;
                     }
-                    memcpy(priv->u.t1.Subrs[inx].data, buf, size);
-                    priv->u.t1.Subrs[inx].size = size;
+                    memcpy(subr_str->data, buf, size);
+                    pdfi_countup(subr_str);
+                    code = pdfi_array_put(s->pdfi_ctx, priv->u.t1.Subrs, inx, (pdf_obj *)subr_str);
+                    pdfi_countdown(subr_str);
+                    if (code < 0)
+                        return code;
                 }
             }
         }
@@ -1121,7 +1163,6 @@ pdf_ps_RD_oper_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
                 pdf_ps_obj_has_type(&s->cur[-1], PDF_PS_OBJ_NAME)) {
                 pdf_string *str = NULL;
                 pdf_obj *key = NULL;
-                bool key_known;
 
                 size = s->cur[0].val.i;
                 buf++;
@@ -1133,24 +1174,21 @@ pdf_ps_RD_oper_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
                 pdfi_countup(key);
 
                 if (buf + size < bufend) {
-                    code = pdfi_dict_known_by_key(s->pdfi_ctx, priv->u.t1.CharStrings, (pdf_name *)key, &key_known);
-                    if (code >=0 && key_known != true) {
-                         code = pdfi_object_alloc(s->pdfi_ctx, PDF_STRING, size, (pdf_obj **) &str);
-                         if (code < 0) {
-                             pdfi_countdown(key);
-                             (void)pdf_ps_stack_pop(s, 2);
-                             return code;
-                         }
-                         pdfi_countup(str);
-                         memcpy(str->data, buf, size);
+                    code = pdfi_object_alloc(s->pdfi_ctx, PDF_STRING, size, (pdf_obj **) &str);
+                    if (code < 0) {
+                        pdfi_countdown(key);
+                        (void)pdf_ps_stack_pop(s, 2);
+                        return code;
+                    }
+                    pdfi_countup(str);
+                    memcpy(str->data, buf, size);
 
-                         code = pdfi_dict_put_obj(s->pdfi_ctx, priv->u.t1.CharStrings, key, (pdf_obj *) str);
-                         if (code < 0) {
-                            pdfi_countdown(str);
-                            pdfi_countdown(key);
-                            (void)pdf_ps_stack_pop(s, 2);
-                            return code;
-                        }
+                    code = pdfi_dict_put_obj(s->pdfi_ctx, priv->u.t1.CharStrings, key, (pdf_obj *) str, false);
+                    if (code < 0) {
+                       pdfi_countdown(str);
+                       pdfi_countdown(key);
+                       (void)pdf_ps_stack_pop(s, 2);
+                       return code;
                     }
                 }
                 pdfi_countdown(str);
@@ -1177,13 +1215,19 @@ pdf_ps_put_oper_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
         pdf_ps_obj_has_type(&s->cur[-2], PDF_PS_OBJ_ARRAY) &&
         pdf_ps_obj_has_type(&s->cur[-1], PDF_PS_OBJ_INTEGER) &&
         pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_NAME)) {
-        if (s->cur[-1].val.i < s->cur[-2].size) {
+        if (s->cur[-1].val.i >= 0 && s->cur[-1].val.i < s->cur[-2].size) {
             pdf_ps_make_name(&s->cur[-2].val.arr[s->cur[-1].val.i], s->cur[0].val.name, s->cur[0].size);
         }
     }
 
     code = pdf_ps_stack_pop(s, 2);
     return code;
+}
+
+static int
+pdf_ps_closefile_oper_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *bufend)
+{
+    return bufend - buf;
 }
 
 static pdf_ps_oper_list_t ps_font_oper_list[] = {
@@ -1210,6 +1254,7 @@ static pdf_ps_oper_list_t ps_font_oper_list[] = {
     {PDF_PS_OPER_NAME_AND_LEN("for"), pdf_ps_pop4_oper_func},
     {PDF_PS_OPER_NAME_AND_LEN("put"), pdf_ps_put_oper_func},
     {PDF_PS_OPER_NAME_AND_LEN("StandardEncoding"), pdf_ps_standardencoding_oper_func},
+    {PDF_PS_OPER_NAME_AND_LEN("closefile"), pdf_ps_closefile_oper_func},
     {NULL, 0, NULL}
 };
 
@@ -1229,7 +1274,7 @@ pdfi_read_ps_font(pdf_context *ctx, pdf_dict *font_dict, byte *fbuf, int fbuflen
        and that can end up in a stackoverflow error, even though we have a complete font. Override it
        and let the Type 1 specific code decide for itself if it can use the font.
      */
-    if (code == gs_error_stackoverflow)
+    if (code == gs_error_pdf_stackoverflow)
         code = 0;
 
     return code;

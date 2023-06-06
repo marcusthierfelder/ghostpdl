@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #include "strmio.h"
@@ -33,6 +33,7 @@ static int cmap_usecmap_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte 
     pdf_cmap *pdficmap = (pdf_cmap *)s->client_data;
     pdf_name *n = NULL;
     pdf_cmap *upcmap = NULL;
+    int code = 0;
 
     if (pdf_ps_stack_count(s) < 1)
         return_error(gs_error_stackunderflow);
@@ -40,7 +41,7 @@ static int cmap_usecmap_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte 
     /* If we've already got some definitions, ignore the usecmap op */
     if (pdficmap->code_space.num_ranges == 0) {
         byte *nstr = NULL;
-        int code, len = s->cur[0].size;
+        int len = s->cur[0].size;
 
         if (pdf_ps_obj_has_type(&(s->cur[0]), PDF_PS_OBJ_NAME)) {
             nstr = s->cur[0].val.name;
@@ -49,9 +50,10 @@ static int cmap_usecmap_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte 
             nstr = s->cur[0].val.string;
         }
         else {
-            return_error(gs_error_typecheck);
+            code = gs_note_error(gs_error_typecheck);
         }
-        code = pdfi_name_alloc(pdficmap->ctx, nstr, len, (pdf_obj **)&n);
+        if (code >= 0)
+            code = pdfi_name_alloc(pdficmap->ctx, nstr, len, (pdf_obj **)&n);
         if (code >= 0) {
             pdfi_countup(n);
             code = pdfi_read_cmap(pdficmap->ctx, (pdf_obj *)n, &upcmap);
@@ -77,10 +79,13 @@ static int cmap_usecmap_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte 
                 }
             }
         }
-
     }
     pdfi_countdown(upcmap);
     pdfi_countdown(n);
+    if (code < 0) {
+        (void)pdf_ps_stack_pop(s, 1);
+        return code;
+    }
     return pdf_ps_stack_pop(s, 1);
 }
 
@@ -103,6 +108,10 @@ static int cmap_endcodespacerange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *
     /* increment to_pop to cover the mark object */
     numranges = to_pop++;
     while (numranges % 2) numranges--;
+    if (numranges > 200) {
+        (void)pdf_ps_stack_pop(s, to_pop);
+        return_error(gs_error_syntaxerror);
+    }
 
     if (numranges > 0
      && pdf_ps_obj_has_type(&(s->cur[0]), PDF_PS_OBJ_STRING)  && s->cur[0].size <= MAX_CMAP_CODE_SIZE
@@ -112,16 +121,25 @@ static int cmap_endcodespacerange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *
 
         code_space->ranges = (gx_code_space_range_t *)gs_alloc_byte_array(mem, code_space->num_ranges,
                           sizeof(gx_code_space_range_t), "cmap_endcodespacerange_func(ranges)");
-        if (nr > 0) {
-            memcpy(code_space->ranges, gcsr, nr);
-            gs_free_object(mem, gcsr, "cmap_endcodespacerange_func(gcsr");
-        }
+        if (code_space->ranges != NULL) {
+            if (nr > 0) {
+                memcpy(code_space->ranges, gcsr, nr * sizeof(gx_code_space_range_t));
+                gs_free_object(mem, gcsr, "cmap_endcodespacerange_func(gcsr");
+            }
 
-        for (i = nr; i < code_space->num_ranges; i++) {
-            int si = i - nr;
-            memcpy(code_space->ranges[i].first, s->cur[-((si * 2) + 1)].val.string, s->cur[-((si * 2) + 1)].size);
-            memcpy(code_space->ranges[i].last, s->cur[-(si * 2)].val.string, s->cur[-(si * 2)].size);
-            code_space->ranges[i].size = s->cur[-(si * 2)].size;
+            for (i = nr; i < code_space->num_ranges; i++) {
+                int si = i - nr;
+                int s1 = s->cur[-((si * 2) + 1)].size < MAX_CMAP_CODE_SIZE ? s->cur[-((si * 2) + 1)].size : MAX_CMAP_CODE_SIZE;
+                int s2 = s->cur[-(si * 2)].size < MAX_CMAP_CODE_SIZE ? s->cur[-(si * 2)].size : MAX_CMAP_CODE_SIZE;
+
+                memcpy(code_space->ranges[i].first, s->cur[-((si * 2) + 1)].val.string, s1);
+                memcpy(code_space->ranges[i].last, s->cur[-(si * 2)].val.string, s2);
+                code_space->ranges[i].size = s->cur[-(si * 2)].size;
+            }
+        }
+        else {
+            (void)pdf_ps_stack_pop(s, to_pop);
+            return_error(gs_error_VMerror);
         }
     }
     return pdf_ps_stack_pop(s, to_pop);
@@ -153,6 +171,10 @@ static int general_endcidrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, pdf_cmap 
      * startcode, endcode and basecid
      */
     while (ncodemaps % 3) ncodemaps--;
+    if (ncodemaps > 300) {
+        (void)pdf_ps_stack_pop(s, to_pop);
+        return_error(gs_error_syntaxerror);
+    }
 
     stobj = &s->cur[-ncodemaps] + 1;
 
@@ -175,7 +197,8 @@ static int general_endcidrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, pdf_cmap 
                 preflen = 1;
             }
 
-            if (stobj[i].size - preflen < 0 || stobj[i + 1].size - preflen < 0) {
+            if (preflen > MAX_CMAP_CODE_SIZE || stobj[i].size - preflen > MAX_CMAP_CODE_SIZE || stobj[i + 1].size - preflen > MAX_CMAP_CODE_SIZE
+                || stobj[i].size - preflen < 0 || stobj[i + 1].size - preflen < 0) {
                 (void)pdf_ps_stack_pop(s, to_pop);
                 return_error(gs_error_syntaxerror);
             }
@@ -221,7 +244,8 @@ static int general_endcidrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, pdf_cmap 
                 if (cmap_insert_map(cmap_range, pdfir) < 0) break;
             }
             else {
-                break;
+                (void)pdf_ps_stack_pop(s, to_pop);
+                return_error(gs_error_VMerror);
             }
         }
     }
@@ -254,6 +278,11 @@ static int cmap_endfbrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, by
      */
     while (ncodemaps % 3) ncodemaps--;
 
+    if (ncodemaps > 300) {
+        (void)pdf_ps_stack_pop(s, to_pop);
+        return_error(gs_error_syntaxerror);
+    }
+
     stobj = &s->cur[-ncodemaps] + 1;
     for (i = 0; i < ncodemaps; i += 3) {
         /* Lazy: to make the loop below simpler, put single
@@ -263,6 +292,7 @@ static int cmap_endfbrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, by
             pdf_ps_stack_object_t *arr;
             arr = (pdf_ps_stack_object_t *) gs_alloc_bytes(mem, sizeof(pdf_ps_stack_object_t), "cmap_endfbrange_func(pdf_ps_stack_object_t");
             if (arr == NULL) {
+                (void)pdf_ps_stack_pop(s, to_pop);
                 return_error(gs_error_VMerror);
             }
             else {
@@ -309,7 +339,7 @@ static int cmap_endfbrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, by
 
                     cidbase = 0;
                     for (m = 0; m < size; m++) {
-                        cidbase |= stobj[i + 2].val.arr[k - srcs].val.string[size - m - 1];
+                        cidbase |= stobj[i + 2].val.arr[k - srcs].val.string[size - m - 1] << (8 * m);
                     }
                 }
                 else {
@@ -362,7 +392,8 @@ static int cmap_endfbrange_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, by
                     if (cmap_insert_map(&(pdficmap->cmap_range), pdfir) < 0) break;
                 }
                 else {
-                    break;
+                    (void)pdf_ps_stack_pop(s, to_pop);
+                    return_error(gs_error_VMerror);
                 }
             }
         }
@@ -383,6 +414,11 @@ static int general_endcidchar_func(gs_memory_t *mem, pdf_ps_ctx_t *s, pdf_cmap *
      * startcode, endcode and basecid
      */
     while (ncodemaps % 2) ncodemaps--;
+
+    if (ncodemaps > 200) {
+        (void)pdf_ps_stack_pop(s, to_pop);
+        return_error(gs_error_syntaxerror);
+    }
 
     stobj = &s->cur[-ncodemaps] + 1;
 
@@ -435,7 +471,8 @@ static int general_endcidchar_func(gs_memory_t *mem, pdf_ps_ctx_t *s, pdf_cmap *
                 if (cmap_insert_map(cmap_range, pdfir) < 0) break;
             }
             else {
-                break;
+                (void)pdf_ps_stack_pop(s, to_pop);
+                return_error(gs_error_VMerror);
             }
         }
     }
@@ -460,6 +497,11 @@ static int cmap_endbfchar_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byt
     int ncodemaps = pdf_ps_stack_count_to_mark(s, PDF_PS_OBJ_MARK);
     pdf_ps_stack_object_t *stobj;
     int i, j;
+
+    if (ncodemaps > 200) {
+        (void)pdf_ps_stack_pop(s, ncodemaps);
+        return_error(gs_error_syntaxerror);
+    }
 
     stobj = &s->cur[-ncodemaps] + 1;
 
@@ -561,7 +603,7 @@ static int cmap_def_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *buf
                 pdficmap->cmaptype = s->cur[0].val.i;
             }
             else {
-                pdficmap->type = 1;
+                pdficmap->cmaptype = 1;
             }
         }
         else if (!memcmp(s->cur[-1].val.name, CMAP_NAME_AND_LEN("XUID"))) {
@@ -588,7 +630,13 @@ static int cmap_def_func(gs_memory_t *mem, pdf_ps_ctx_t *s, byte *buf, byte *buf
         }
         else if (!memcmp(s->cur[-1].val.name, CMAP_NAME_AND_LEN("WMode"))) {
             if (pdf_ps_obj_has_type(&s->cur[0], PDF_PS_OBJ_INTEGER)) {
-                pdficmap->wmode = s->cur[0].val.i;
+                if (s->cur[0].val.i != 0) {
+                    if (s->cur[0].val.i != 1)
+                        pdfi_set_warning(s->pdfi_ctx, 0, NULL, W_PDF_BAD_WMODE, "cmap_def_func", NULL);
+                    pdficmap->wmode = 1;
+                }
+                else
+                    pdficmap->wmode = 0;
             }
             else {
                 pdficmap->wmode = 0;
@@ -645,10 +693,10 @@ pdf_cmap_open_file(pdf_context *ctx, gs_string *cmap_name, byte **buf, int64_t *
     const char *path_pfx = "CMap/";
     fname[0] = '\0';
 
-    strncat(fname, path_pfx, strlen(path_pfx));
-    if (strlen(fname) + cmap_name->size >= gp_file_name_sizeof)
+    if (strlen(path_pfx) + cmap_name->size >= gp_file_name_sizeof)
         return_error(gs_error_rangecheck);
 
+    strncat(fname, path_pfx, strlen(path_pfx));
     strncat(fname, (char *)cmap_name->data, cmap_name->size);
     code = pdfi_open_resource_file(ctx, (const char *)fname, (const int)strlen(fname), &s);
     if (code >= 0) {
@@ -744,21 +792,24 @@ pdfi_read_cmap(pdf_context *ctx, pdf_obj *cmap, pdf_cmap **pcmap)
     pdf_cmap pdficm[3] = {0};
     pdf_cmap *pdfi_cmap = &(pdficm[1]);
     byte *buf = NULL;
-    int64_t buflen;
+    int64_t buflen = 0;
     pdf_ps_ctx_t cmap_ctx;
 
     pdfi_cmap->ctx = ctx;
-    if (cmap->type == PDF_NAME) {
-        gs_string cmname;
-        pdf_name *cmapn = (pdf_name *)cmap;
-        cmname.data = cmapn->data;
-        cmname.size = cmapn->length;
-        code = pdf_cmap_open_file(ctx, &cmname, &buf, &buflen);
-        if (code < 0)
-            goto error_out;
-    }
-    else {
-        if (cmap->type == PDF_STREAM) {
+    switch (pdfi_type_of(cmap)) {
+        case PDF_NAME:
+        {
+            gs_string cmname;
+            pdf_name *cmapn = (pdf_name *)cmap;
+            cmname.data = cmapn->data;
+            cmname.size = cmapn->length;
+            code = pdf_cmap_open_file(ctx, &cmname, &buf, &buflen);
+            if (code < 0)
+                goto error_out;
+            break;
+        }
+        case PDF_STREAM:
+        {
             pdf_obj *ucmap;
             pdf_cmap *upcmap = NULL;
             pdf_dict *cmap_dict = NULL;
@@ -800,11 +851,11 @@ pdfi_read_cmap(pdf_context *ctx, pdf_obj *cmap, pdf_cmap **pcmap)
             if (code < 0) {
                 goto error_out;
             }
+            break;
         }
-        else {
-          code = gs_note_error(gs_error_typecheck);
-          goto error_out;
-        }
+        default:
+            code = gs_note_error(gs_error_typecheck);
+            goto error_out;
     }
     pdfi_cmap->ctx = ctx;
     pdfi_cmap->buf = buf;
@@ -840,6 +891,9 @@ pdfi_read_cmap(pdf_context *ctx, pdf_obj *cmap, pdf_cmap **pcmap)
                 code = replace_cache_entry(ctx, (pdf_obj *)pdfi_cmap);
             }
         }
+    }
+    else {
+        goto error_out;
     }
     return 0;
 

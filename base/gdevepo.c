@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Device for erasepage optimization subclass device */
@@ -235,6 +235,7 @@ disable_self(gx_device *dev)
     set_dev_proc(dev, process_page, default_subclass_process_page);
     set_dev_proc(dev, transform_pixel_region, default_subclass_transform_pixel_region);
     set_dev_proc(dev, fill_stroke_path, default_subclass_fill_stroke_path);
+    set_dev_proc(dev, lock_pattern, default_subclass_lock_pattern);
 }
 
 int
@@ -317,7 +318,7 @@ epo_handle_erase_page(gx_device *dev)
     DPRINTF1(dev->memory, "Do fillpage, Uninstall erasepage, device %s\n", dev->dname);
 
     /* Just do a fill_rectangle (using saved color) */
-    if (dev->child && dev->child->is_open && data->queued) {
+    if (dev->child && dev->child->is_open && data->queued && dev_proc(dev->child, fill_rectangle) != NULL) {
         code = dev_proc(dev->child, fill_rectangle)(dev->child,
                                                     0, 0,
                                                     dev->child->width,
@@ -370,7 +371,10 @@ int epo_fill_rectangle(gx_device *dev, int x, int y, int width, int height, gx_c
     if (code != 0)
         return code;
     dev = dev->child;
-    return dev_proc(dev, fill_rectangle)(dev, x, y, width, height, color);
+    if (dev_proc(dev, fill_rectangle) != NULL)
+        return dev_proc(dev, fill_rectangle)(dev, x, y, width, height, color);
+    else
+        return 0;
 }
 
 int epo_fill_path(gx_device *dev, const gs_gstate *pgs, gx_path *ppath,

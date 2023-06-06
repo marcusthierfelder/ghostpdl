@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -224,7 +224,14 @@ pdf_viewer_state_from_gs_gstate_aux(pdf_viewer_state *pvs, const gs_gstate *pgs)
     pvs->text_knockout = pgs->text_knockout;
     pvs->fill_overprint = false;
     pvs->stroke_overprint = false;
-    pvs->stroke_adjust = false;
+    /* The PDF Reference says that the default is 'false' but experiments show (bug #706407)
+     * that Acrobat defaults to true. Also Ghostscript, at low resolution at least, defaults
+     * to true as well. By setting the initial value to neither true nor false we can ensure
+     * that any input file which sets it, whether true or false, will cause it not to match
+     * the initial value, so we will write it out, thus preserving the value, no matter what
+     * the default.
+     */
+    pvs->stroke_adjust = -1;
     pvs->line_params.half_width = 0.5;
     pvs->line_params.start_cap = 0;
     pvs->line_params.end_cap = 0;
@@ -2083,7 +2090,7 @@ transfer_map_access_signed(const gs_data_source_t *psrc,
 static int
 pdf_write_transfer_map(gx_device_pdf *pdev, const gx_transfer_map *map,
                        int range0, bool check_identity,
-                       const char *key, char *ids)
+                       const char *key, char *ids, int id_max)
 {
     gs_memory_t *mem = pdev->pdf_memory;
     gs_function_Sd_params_t params;
@@ -2152,14 +2159,14 @@ pdf_write_transfer_map(gx_device_pdf *pdev, const gx_transfer_map *map,
     gs_function_free(pfn, false, mem);
     if (code < 0)
         return code;
-    gs_sprintf(ids, "%s%s%ld 0 R", key, (key[0] && key[0] != ' ' ? " " : ""), id);
+    gs_snprintf(ids, id_max, "%s%s%ld 0 R", key, (key[0] && key[0] != ' ' ? " " : ""), id);
     return 0;
 }
 static int
 pdf_write_transfer(gx_device_pdf *pdev, const gx_transfer_map *map,
-                   const char *key, char *ids)
+                   const char *key, char *ids, int id_max)
 {
-    return pdf_write_transfer_map(pdev, map, 0, true, key, ids);
+    return pdf_write_transfer_map(pdev, map, 0, true, key, ids, id_max);
 }
 
 /* ------ Halftones ------ */
@@ -2395,7 +2402,7 @@ pdf_write_spot_halftone(gx_device_pdf *pdev, const gs_spot_halftone *psht,
 
     if (pdev->CompatibilityLevel <= 1.7) {
         code = pdf_write_transfer(pdev, porder->transfer, "/TransferFunction",
-                                  trs);
+                                  trs, sizeof(trs));
         if (code < 0)
             return code;
     }
@@ -2515,7 +2522,7 @@ pdf_write_threshold_halftone(gx_device_pdf *pdev,
     memset(trs, 0x00, 17 + MAX_FN_CHARS + 1);
     if (pdev->CompatibilityLevel <= 1.7) {
         code = pdf_write_transfer(pdev, porder->transfer, "",
-                                  trs);
+                                  trs, sizeof(trs));
 
         if (code < 0)
             return code;
@@ -2549,7 +2556,7 @@ pdf_write_threshold2_halftone(gx_device_pdf *pdev,
     memset(trs, 0x00, 17 + MAX_FN_CHARS + 1);
     if (pdev->CompatibilityLevel <= 1.7) {
         code = pdf_write_transfer(pdev, porder->transfer, "",
-                                  trs);
+                                  trs, sizeof(trs));
 
         if (code < 0)
             return code;
@@ -2710,7 +2717,7 @@ pdf_write_multiple_halftone(gx_device_pdf *pdev, gs_gstate *pgs,
  */
 static int
 pdf_update_halftone(gx_device_pdf *pdev, const gs_gstate *pgs,
-                    char *hts)
+                    char *hts, int hts_max)
 {
     const gs_halftone *pht = pgs->halftone;
     const gx_device_halftone *pdht = pgs->dev_ht[HT_OBJTYPE_DEFAULT];
@@ -2748,7 +2755,7 @@ pdf_update_halftone(gx_device_pdf *pdev, const gs_gstate *pgs,
     }
     if (code < 0)
         return code;
-    gs_sprintf(hts, "%ld 0 R", id);
+    gs_snprintf(hts, hts_max, "%ld 0 R", id);
     pdev->halftone_id = pgs->dev_ht[HT_OBJTYPE_DEFAULT]->id;
     return code;
 }
@@ -2816,7 +2823,7 @@ pdf_end_gstate(gx_device_pdf *pdev, pdf_resource_t *pres)
  */
 static int
 pdf_update_transfer(gx_device_pdf *pdev, const gs_gstate *pgs,
-                    char *trs)
+                    char *trs, int trs_max)
 {
     int i, pi = -1;
     bool multiple = false, update = false;
@@ -2842,7 +2849,7 @@ pdf_update_transfer(gx_device_pdf *pdev, const gs_gstate *pgs,
         int mask;
 
         if (!multiple) {
-            code = pdf_write_transfer(pdev, tm[pi], "", trs);
+            code = pdf_write_transfer(pdev, tm[pi], "", trs, trs_max);
             if (code < 0)
                 return code;
             mask = code == 0;
@@ -2851,9 +2858,10 @@ pdf_update_transfer(gx_device_pdf *pdev, const gs_gstate *pgs,
             mask = 0;
             for (i = 0; i < 4; ++i)
                 if (tm[i] != NULL) {
+                    int len = (int)strlen(trs);
                     code = pdf_write_transfer_map(pdev,
                                                   tm[i],
-                                                  0, true, " ", trs + strlen(trs));
+                                                  0, true, " ", trs + len, trs_max - len);
                     if (code < 0)
                         return code;
                     mask |= (code == 0) << i;
@@ -2891,7 +2899,7 @@ pdf_update_alpha(gx_device_pdf *pdev, const gs_gstate *pgs,
             }
         }
         else{
-            gs_sprintf(buf, "%ld 0 R", pgs->soft_mask_id);
+            gs_snprintf(buf, sizeof(buf), "%ld 0 R", pgs->soft_mask_id);
             code = pdf_open_gstate(pdev, ppres);
             if (code < 0)
                 return code;
@@ -2941,6 +2949,9 @@ pdf_prepare_drawing(gx_device_pdf *pdev, const gs_gstate *pgs,
     int bottom;
 
     if (pdev->CompatibilityLevel >= 1.4) {
+        code = pdf_update_alpha(pdev, pgs, ppres, for_text);
+        if (code < 0)
+            return code;
         if (pdev->state.blend_mode != pgs->blend_mode) {
             static const char *const bm_names[] = { GS_BLEND_MODE_NAMES };
             char buf[20];
@@ -2955,9 +2966,6 @@ pdf_prepare_drawing(gx_device_pdf *pdev, const gs_gstate *pgs,
                 return code;
             pdev->state.blend_mode = pgs->blend_mode;
         }
-        code = pdf_update_alpha(pdev, pgs, ppres, for_text);
-        if (code < 0)
-            return code;
     } else {
         /*
          * If the graphics state calls for any transparency functions,
@@ -2991,28 +2999,28 @@ pdf_prepare_drawing(gx_device_pdf *pdev, const gs_gstate *pgs,
             pdev->halftone_id != pgs->dev_ht[HT_OBJTYPE_DEFAULT]->id &&
             !pdev->PDFX
             ) {
-            code = pdf_update_halftone(pdev, pgs, hts);
+            code = pdf_update_halftone(pdev, pgs, hts, sizeof(hts));
             if (code < 0)
                 return code;
         }
         if (pdev->params.TransferFunctionInfo != tfi_Remove &&
             !pdev->PDFX && pdev->PDFA == 0
             ) {
-            code = pdf_update_transfer(pdev, pgs, trs);
+            code = pdf_update_transfer(pdev, pgs, trs, sizeof(trs));
             if (code < 0)
                 return code;
         }
         if (pdev->params.UCRandBGInfo == ucrbg_Preserve) {
             if (pgs->black_generation && pdev->black_generation_id != pgs->black_generation->id) {
                 code = pdf_write_transfer_map(pdev, pgs->black_generation,
-                                              0, false, "", bgs);
+                                              0, false, "", bgs, sizeof(bgs));
                 if (code < 0)
                     return code;
                 pdev->black_generation_id = pgs->black_generation->id;
             }
             if (pgs->undercolor_removal && pdev->undercolor_removal_id != pgs->undercolor_removal->id) {
                 code = pdf_write_transfer_map(pdev, pgs->undercolor_removal,
-                                              -1, false, "", ucrs);
+                                              -1, false, "", ucrs, sizeof(ucrs));
                 if (code < 0)
                     return code;
                 pdev->undercolor_removal_id = pgs->undercolor_removal->id;
@@ -3068,7 +3076,7 @@ pdf_prepare_drawing(gx_device_pdf *pdev, const gs_gstate *pgs,
                         break;
                     default:
                         emprintf(pdev->memory,
-                             "\nSetting Overprint Mode to 1\n not permitted in PDF/A, unrecognised PDFACompatibilityLevel,\nreverting to normal PDF output\n");
+                             "\nSetting Halftone Phase or Halftone Offset\n not permitted in PDF/A, unrecognised PDFACompatibilityLevel,\nreverting to normal PDF output\n");
                         pdev->AbortPDFAX = true;
                         pdev->PDFA = 0;
                         break;
@@ -3080,7 +3088,7 @@ pdf_prepare_drawing(gx_device_pdf *pdev, const gs_gstate *pgs,
                 code = pdf_open_gstate(pdev, ppres);
                 if (code < 0)
                     return code;
-                gs_sprintf(buf, "[%d %d]", phase.x, phase.y);
+                gs_snprintf(buf, sizeof(buf), "[%d %d]", phase.x, phase.y);
                 if (pdev->CompatibilityLevel >= 1.999)
                     code = cos_dict_put_string_copy(resource_dict(*ppres), "/HTO", buf);
                 else
@@ -3268,13 +3276,32 @@ pdf_try_prepare_stroke(gx_device_pdf *pdev, const gs_gstate *pgs, bool for_text)
         pdev->fill_overprint = pgs->stroke_overprint;
     }
     if (pdev->state.stroke_adjust != pgs->stroke_adjust) {
-        code = pdf_open_gstate(pdev, &pres);
-        if (code < 0)
-            return code;
-        code = cos_dict_put_c_key_bool(resource_dict(pres), "/SA", pgs->stroke_adjust);
-        if (code < 0)
-            return code;
-        pdev->state.stroke_adjust = pgs->stroke_adjust;
+        /* Frankly this is awfully hacky. There is a problem with ps2write and type 3 fonts, for
+         * reasons best known to itself it does not seem to collect all the /Resources required
+         * for CharProcs when we meddle with the stroke adjustment. This 'seems' to be because it
+         * only collects them when it runs the BuildChar, if we use the existing CharProc in a
+         * different font then it can miss the Resources needed for the ExtGState.
+         * This does not happen with pdfwrite!
+         * Since ps2write doesn't require us to store teh staroke adjustment in an ExtGState
+         * anyway, just emit it directly.
+         * File exhibiting this is tests_private/comparefiles/Bug688967.ps
+         */
+        if (!pdev->ForOPDFRead) {
+            code = pdf_open_gstate(pdev, &pres);
+            if (code < 0)
+                return code;
+            code = cos_dict_put_c_key_bool(resource_dict(pres), "/SA", pgs->stroke_adjust);
+            if (code < 0)
+                return code;
+            pdev->state.stroke_adjust = pgs->stroke_adjust;
+        } else {
+            if (pgs->stroke_adjust)
+                stream_puts(gdev_vector_stream((gx_device_vector *)pdev), "true setstrokeadjust\n");
+            else
+                stream_puts(gdev_vector_stream((gx_device_vector *)pdev), "false setstrokeadjust\n");
+            pdev->state.stroke_adjust = pgs->stroke_adjust;
+        }
+
     }
     return pdf_end_gstate(pdev, pres);
 }

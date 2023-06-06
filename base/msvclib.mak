@@ -1,4 +1,4 @@
-# Copyright (C) 2001-2021 Artifex Software, Inc.
+# Copyright (C) 2001-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 # makefile for Microsoft Visual C++ 4.1 or later, Windows NT or Windows 95 LIBRARY.
 #
@@ -646,6 +646,46 @@ MSVC_VERSION=16
 MS_TOOLSET_VERSION=14.29.30133
 !endif
 !if "$(_NMAKE_VER)" == "14.29.30137.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30139.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30140.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30141.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30142.1"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30145.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30146.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30147.0"
+# VS2019 (Toolset v142)
+MSVC_VERSION=16
+MS_TOOLSET_VERSION=14.29.30133
+!endif
+!if "$(_NMAKE_VER)" == "14.29.30148.0"
 # VS2019 (Toolset v142)
 MSVC_VERSION=16
 MS_TOOLSET_VERSION=14.29.30133

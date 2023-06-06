@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Page-level operations for the PDF interpreter */
@@ -26,6 +26,7 @@
 #include "pdf_loop_detect.h"
 #include "pdf_colour.h"
 #include "pdf_trans.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_misc.h"
 #include "pdf_optcontent.h"
@@ -55,7 +56,7 @@ static int pdfi_process_page_contents(pdf_context *ctx, pdf_dict *page_dict)
     if (code < 0)
         return code;
 
-    if (o->type == PDF_INDIRECT) {
+    if (pdfi_type_of(o) == PDF_INDIRECT) {
         if (((pdf_indirect_ref *)o)->ref_object_num == page_dict->object_num)
             return_error(gs_error_circular_reference);
 
@@ -76,7 +77,7 @@ static int pdfi_process_page_contents(pdf_context *ctx, pdf_dict *page_dict)
     }
 
     ctx->encryption.decrypt_strings = false;
-    if (o->type == PDF_ARRAY) {
+    if (pdfi_type_of(o) == PDF_ARRAY) {
         pdf_array *a = (pdf_array *)o;
 
         for (i=0;i < pdfi_array_size(a); i++) {
@@ -84,13 +85,13 @@ static int pdfi_process_page_contents(pdf_context *ctx, pdf_dict *page_dict)
             code = pdfi_array_get_no_deref(ctx, a, i, (pdf_obj **)&r);
             if (code < 0)
                 goto page_error;
-            if (r->type == PDF_STREAM) {
+            if (pdfi_type_of (r) == PDF_STREAM) {
                 code = pdfi_interpret_content_stream(ctx, NULL, (pdf_stream *)r, page_dict);
                 pdfi_countdown(r);
                 if (code < 0)
                     goto page_error;
             } else {
-                if (r->type != PDF_INDIRECT) {
+                if (pdfi_type_of(r) != PDF_INDIRECT) {
                         pdfi_countdown(r);
                         code = gs_note_error(gs_error_typecheck);
                         goto page_error;
@@ -107,7 +108,7 @@ static int pdfi_process_page_contents(pdf_context *ctx, pdf_dict *page_dict)
                             code = 0;
                         goto page_error;
                     }
-                    if (o1->type != PDF_STREAM) {
+                    if (pdfi_type_of(o1) != PDF_STREAM) {
                         pdfi_countdown(o1);
                         code = gs_note_error(gs_error_typecheck);
                         goto page_error;
@@ -122,13 +123,10 @@ static int pdfi_process_page_contents(pdf_context *ctx, pdf_dict *page_dict)
             }
         }
     } else {
-        if (o->type == PDF_STREAM) {
+        if (pdfi_type_of(o) == PDF_STREAM) {
             code = pdfi_interpret_content_stream(ctx, NULL, (pdf_stream *)o, page_dict);
-        } else {
-            pdfi_countdown(o);
-            ctx->encryption.decrypt_strings = true;
-            return_error(gs_error_typecheck);
-        }
+        } else
+            code = gs_note_error(gs_error_typecheck);
     }
 page_error:
     ctx->encryption.decrypt_strings = true;
@@ -162,12 +160,28 @@ static int pdfi_process_one_page(pdf_context *ctx, pdf_dict *page_dict)
     cleanup_context_interpretation(ctx, &local_entry_save);
     local_restore_stream_state(ctx, &local_entry_save);
 
+    local_save_stream_state(ctx, &local_entry_save);
+    initialise_stream_save(ctx);
+
     code1 = pdfi_do_annotations(ctx, page_dict);
-    if (code > 0) code = code1;
+    if (code >= 0) code = code1;
+
+    cleanup_context_interpretation(ctx, &local_entry_save);
+    local_restore_stream_state(ctx, &local_entry_save);
+
+    local_save_stream_state(ctx, &local_entry_save);
+    initialise_stream_save(ctx);
 
     code1 = pdfi_do_acroform(ctx, page_dict);
-    if (code > 0) code = code1;
+    if (code >= 0) code = code1;
 
+    cleanup_context_interpretation(ctx, &local_entry_save);
+    local_restore_stream_state(ctx, &local_entry_save);
+
+    if (ctx->text.BlockDepth != 0) {
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_UNBLANACED_BT, "pdfi_process_one_page", "");
+        ctx->text.BlockDepth = 0;
+    }
     return code;
 }
 
@@ -232,9 +246,10 @@ static int pdfi_get_media_size(pdf_context *ctx, pdf_dict *page_dict)
     }
     if (a == NULL) {
         a = default_media;
+        pdfi_countup(a);
     }
 
-    if (!ctx->args.nouserunit) {
+    if (!ctx->args.nouserunit && !ctx->device_state.PassUserUnit) {
         (void)pdfi_dict_knownget_number(ctx, page_dict, "UserUnit", &userunit);
     }
     ctx->page.UserUnit = userunit;
@@ -244,6 +259,7 @@ static int pdfi_get_media_size(pdf_context *ctx, pdf_dict *page_dict)
         d[i] *= userunit;
     }
     pdfi_countdown(a);
+    pdfi_countdown(default_media);
 
     normalize_rectangle(d);
     memcpy(ctx->page.Size, d, 4 * sizeof(double));
@@ -294,25 +310,53 @@ static int pdfi_set_media_size(pdf_context *ctx, pdf_dict *page_dict)
     if (a == NULL) {
         code = pdfi_dict_get_type(ctx, page_dict, "CropBox", PDF_ARRAY, (pdf_obj **)&a);
         if (code >= 0 && pdfi_array_size(a) >= 4) {
+            pdf_obj *box_obj = NULL;
+
             for (i=0;i<4;i++) {
-                code = pdfi_array_get_number(ctx, a, i, &d_crop[i]);
-                d_crop[i] *= userunit;
+                code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+                if (code >= 0) {
+                    code = pdfi_obj_to_real(ctx, box_obj, &d_crop[i]);
+                    pdfi_countdown(box_obj);
+                }
+                if (code < 0)
+                    break;
             }
             pdfi_countdown(a);
-            normalize_rectangle(d_crop);
-            memcpy(ctx->page.Crop, d_crop, 4 * sizeof(double));
-            do_crop = true;
+            if (code >= 0) {
+                normalize_rectangle(d_crop);
+                memcpy(ctx->page.Crop, d_crop, 4 * sizeof(double));
+                do_crop = true;
+            }
         }
         a = default_media;
     }
 
     if (!ctx->args.nouserunit) {
-        (void)pdfi_dict_knownget_number(ctx, page_dict, "UserUnit", &userunit);
+        if (ctx->device_state.PassUserUnit) {
+            double unit = 1.0;
+            (void)pdfi_dict_knownget_number(ctx, page_dict, "UserUnit", &unit);
+            (void)pdfi_device_set_param_float(ctx->pgs->device, "UserUnit", unit);
+        } else {
+            (void)pdfi_dict_knownget_number(ctx, page_dict, "UserUnit", &userunit);
+        }
     }
     ctx->page.UserUnit = userunit;
 
     for (i=0;i<4;i++) {
-        code = pdfi_array_get_number(ctx, a, i, &d[i]);
+        pdf_obj *box_obj = NULL;
+
+        code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+        if (code >= 0) {
+            code = pdfi_obj_to_real(ctx, box_obj, &d[i]);
+            pdfi_countdown(box_obj);
+        }
+
+        if (code < 0) {
+            pdfi_countdown(a);
+            pdfi_set_warning(ctx, code, NULL, W_PDF_BAD_MEDIABOX, "pdfi_get_media_size", NULL);
+            code = gs_erasepage(ctx->pgs);
+            return 0;
+        }
         d[i] *= userunit;
     }
     pdfi_countdown(a);
@@ -457,26 +501,21 @@ static void pdfi_setup_transfers(pdf_context *ctx)
     }
 }
 
-static int store_box(pdf_context *ctx, float *box, pdf_array *a)
+/* Return a dictionary containing information about the page. Basic information is that
+ * required to render the page; if extended is true then additionally contains an
+ * array of spot ink names and an array of dictionaries each of which contains
+ * information about a font used on the page. THis is normally only used for tools
+ * like pdf_info.ps
+ */
+int pdfi_page_info(pdf_context *ctx, uint64_t page_num, pdf_dict **info, bool extended)
 {
-    double f;
-    int code = 0, i;
-
-    for (i=0;i < 4;i++) {
-        code = pdfi_array_get_number(ctx, a, (uint64_t)i, &f);
-        if (code < 0)
-            return code;
-        box[i] = (float)f;
-    }
-    return 0;
-}
-
-int pdfi_page_info(pdf_context *ctx, uint64_t page_num, pdf_info_t *info)
-{
-    int code = 0;
-    pdf_dict *page_dict = NULL;
+    int code = 0, i=0;
+    pdf_dict *page_dict = NULL, *info_dict = NULL;
+    pdf_array *fonts_array = NULL, *spots_array = NULL;
     pdf_array *a = NULL;
-    double dbl = 0.0;
+    pdf_obj *o = NULL;
+    bool known = false;
+    double dummy;
 
     code = pdfi_page_get_dict(ctx, page_num, &page_dict);
     if (code < 0)
@@ -487,79 +526,202 @@ int pdfi_page_info(pdf_context *ctx, uint64_t page_num, pdf_info_t *info)
         goto done;
     }
 
-    code = pdfi_check_page(ctx, page_dict, false);
+    code = pdfi_dict_alloc(ctx, 6, &info_dict);
     if (code < 0)
         goto done;
 
-    info->boxes = BOX_NONE;
+    pdfi_countup(info_dict);
+
+    if (extended)
+        code = pdfi_check_page(ctx, page_dict, &fonts_array, &spots_array, false);
+    else
+        code = pdfi_check_page(ctx, page_dict, NULL, NULL, false);
+    if (code < 0)
+        goto done;
+
+    if (spots_array != NULL) {
+        code = pdfi_dict_put(ctx, info_dict, "Spots", (pdf_obj *)spots_array);
+        if (code < 0)
+            goto done;
+        pdfi_countdown(spots_array);
+    }
+
+    if (fonts_array != NULL) {
+        code = pdfi_dict_put(ctx, info_dict, "Fonts", (pdf_obj *)fonts_array);
+        if (code < 0)
+            goto done;
+        pdfi_countdown(fonts_array);
+    }
+
     code = pdfi_dict_get_type(ctx, page_dict, "MediaBox", PDF_ARRAY, (pdf_obj **)&a);
     if (code < 0)
         pdfi_set_warning(ctx, code, NULL, W_PDF_BAD_MEDIABOX, "pdfi_page_info", NULL);
 
     if (code >= 0) {
-        code = store_box(ctx, (float *)&info->MediaBox, a);
+        pdf_obj *box_obj = NULL;
+
+        for (i = 0;i < pdfi_array_size(a); i++) {
+            code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+            if (code >= 0) {
+                code = pdfi_obj_to_real(ctx, box_obj, &dummy);
+                pdfi_countdown(box_obj);
+            }
+            if (code < 0) {
+                pdfi_set_warning(ctx, code, NULL, W_PDF_BAD_MEDIABOX, "pdfi_page_info", NULL);
+                goto done;
+            }
+        }
+
+        code = pdfi_dict_put(ctx, info_dict, "MediaBox", (pdf_obj *)a);
         if (code < 0)
             goto done;
-        info->boxes |= MEDIA_BOX;
         pdfi_countdown(a);
         a = NULL;
     }
 
     code = pdfi_dict_get_type(ctx, page_dict, "ArtBox", PDF_ARRAY, (pdf_obj **)&a);
     if (code >= 0) {
-        code = store_box(ctx, (float *)&info->ArtBox, a);
-        if (code < 0)
-            goto done;
-        info->boxes |= ART_BOX;
+        pdf_obj *box_obj = NULL;
+
+        for (i = 0;i < pdfi_array_size(a); i++) {
+            code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+            if (code >= 0) {
+                code = pdfi_obj_to_real(ctx, box_obj, &dummy);
+                pdfi_countdown(box_obj);
+            }
+            if (code < 0)
+                break;
+        }
+        if (code >= 0) {
+            code = pdfi_dict_put(ctx, info_dict, "ArtBox", (pdf_obj *)a);
+            if (code < 0)
+                goto done;
+        }
         pdfi_countdown(a);
         a = NULL;
     }
 
     code = pdfi_dict_get_type(ctx, page_dict, "CropBox", PDF_ARRAY, (pdf_obj **)&a);
     if (code >= 0) {
-        code = store_box(ctx, (float *)&info->CropBox, a);
-        if (code < 0)
-            goto done;
-        info->boxes |= CROP_BOX;
+        pdf_obj *box_obj = NULL;
+
+        for (i = 0;i < pdfi_array_size(a); i++) {
+            code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+            if (code >= 0) {
+                code = pdfi_obj_to_real(ctx, box_obj, &dummy);
+                pdfi_countdown(box_obj);
+            }
+            if (code < 0)
+                break;
+        }
+        if (code >= 0) {
+            code = pdfi_dict_put(ctx, info_dict, "CropBox", (pdf_obj *)a);
+            if (code < 0)
+                goto done;
+        }
         pdfi_countdown(a);
         a = NULL;
     }
 
     code = pdfi_dict_get_type(ctx, page_dict, "TrimBox", PDF_ARRAY, (pdf_obj **)&a);
     if (code >= 0) {
-        code = store_box(ctx, (float *)&info->TrimBox, a);
-        if (code < 0)
-            goto done;
-        info->boxes |= TRIM_BOX;
+        pdf_obj *box_obj = NULL;
+
+        for (i = 0;i < pdfi_array_size(a); i++) {
+            code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+            if (code >= 0) {
+                code = pdfi_obj_to_real(ctx, box_obj, &dummy);
+                pdfi_countdown(box_obj);
+            }
+            if (code < 0)
+                break;
+        }
+        if (code >= 0) {
+            code = pdfi_dict_put(ctx, info_dict, "TrimBox", (pdf_obj *)a);
+            if (code < 0)
+                goto done;
+        }
         pdfi_countdown(a);
         a = NULL;
     }
 
     code = pdfi_dict_get_type(ctx, page_dict, "BleedBox", PDF_ARRAY, (pdf_obj **)&a);
     if (code >= 0) {
-        code = store_box(ctx, (float *)&info->BleedBox, a);
-        if (code < 0)
-            goto done;
-        info->boxes |= BLEED_BOX;
+        pdf_obj *box_obj = NULL;
+
+        for (i = 0;i < pdfi_array_size(a); i++) {
+            code = pdfi_array_get_no_store_R(ctx, a, i, &box_obj);
+            if (code >= 0) {
+                code = pdfi_obj_to_real(ctx, box_obj, &dummy);
+                pdfi_countdown(box_obj);
+            }
+            if (code < 0)
+                break;
+        }
+        if (code >= 0) {
+            code = pdfi_dict_put(ctx, info_dict, "BleedBox", (pdf_obj *)a);
+            if (code < 0)
+                goto done;
+        }
         pdfi_countdown(a);
         a = NULL;
     }
     code = 0;
 
-    dbl = info->Rotate = 0;
-    code = pdfi_dict_get_number(ctx, page_dict, "Rotate", &dbl);
-    code = 0;
-    info->Rotate = dbl;
+    code = pdfi_dict_get(ctx, page_dict, "Rotate", &o);
+    if (code >= 0) {
+        if (pdfi_type_of(o) == PDF_INT || pdfi_type_of(o) == PDF_REAL) {
+            code = pdfi_dict_put(ctx, info_dict, "Rotate", o);
+            if (code < 0)
+                goto done;
+        }
+        pdfi_countdown(o);
+    }
 
-    dbl = info->UserUnit = 1;
-    code = pdfi_dict_get_number(ctx, page_dict, "UserUnit", &dbl);
-    code = 0;
-    info->UserUnit = dbl;
+    code = pdfi_dict_get(ctx, page_dict, "UserUnit", &o);
+    if (code >= 0) {
+        if (pdfi_type_of(o) == PDF_INT || pdfi_type_of(o) == PDF_REAL) {
+            code = pdfi_dict_put(ctx, info_dict, "UserUnit", o);
+            if (code < 0)
+                goto done;
+        }
+        pdfi_countdown(o);
+    }
 
-    info->HasTransparency = ctx->page.has_transparency;
-    info->NumSpots = ctx->page.num_spots;
+    if (ctx->page.has_transparency)
+        code = pdfi_dict_put(ctx, info_dict, "UsesTransparency", PDF_TRUE_OBJ);
+    else
+        code = pdfi_dict_put(ctx, info_dict, "UsesTransparency", PDF_FALSE_OBJ);
+    if (code < 0)
+        goto done;
+
+    code = pdfi_dict_known(ctx, page_dict, "Annots", &known);
+    if (code >= 0 && known)
+        code = pdfi_dict_put(ctx, info_dict, "Annots", PDF_TRUE_OBJ);
+    else
+        code = pdfi_dict_put(ctx, info_dict, "Annots", PDF_FALSE_OBJ);
+    if (code < 0)
+        goto done;
+
+    code = pdfi_object_alloc(ctx, PDF_INT, 0, &o);
+    if (code >= 0) {
+        pdfi_countup(o);
+        ((pdf_num *)o)->value.i = ctx->page.num_spots;
+        code = pdfi_dict_put(ctx, info_dict, "NumSpots", o);
+        pdfi_countdown(o);
+        o = NULL;
+        if (code < 0)
+            goto done;
+    }
 
 done:
+    if (code < 0) {
+        pdfi_countdown(info_dict);
+        info_dict = NULL;
+        *info = NULL;
+    } else
+        *info = info_dict;
+
     pdfi_countdown(a);
     pdfi_countdown(page_dict);
     return code;
@@ -584,7 +746,7 @@ int pdfi_page_get_dict(pdf_context *ctx, uint64_t page_num, pdf_dict **dict)
         code = pdfi_dict_get(ctx, ctx->Root, "Pages", &o);
         if (code < 0)
             goto page_error;
-        if (o->type != PDF_DICT) {
+        if (pdfi_type_of(o) != PDF_DICT) {
             code = gs_note_error(gs_error_typecheck);
             goto page_error;
         }
@@ -662,14 +824,35 @@ int pdfi_page_get_number(pdf_context *ctx, pdf_dict *target_dict, uint64_t *page
 static void release_page_DefaultSpaces(pdf_context *ctx)
 {
     if (ctx->page.DefaultGray_cs != NULL) {
+        if (ctx->page.DefaultGray_cs->interpreter_data != NULL) {
+            pdf_obj *o = (pdf_obj *)(ctx->page.DefaultGray_cs->interpreter_data);
+            if (o != NULL && pdfi_type_of(o) == PDF_NAME) {
+                pdfi_countdown(o);
+                ctx->page.DefaultGray_cs->interpreter_data = NULL;
+            }
+        }
         rc_decrement(ctx->page.DefaultGray_cs, "pdfi_page_render");
         ctx->page.DefaultGray_cs = NULL;
     }
     if (ctx->page.DefaultRGB_cs != NULL) {
+        if (ctx->page.DefaultRGB_cs->interpreter_data != NULL) {
+            pdf_obj *o = (pdf_obj *)(ctx->page.DefaultRGB_cs->interpreter_data);
+            if (o != NULL && pdfi_type_of(o) == PDF_NAME) {
+                pdfi_countdown(o);
+                ctx->page.DefaultRGB_cs->interpreter_data = NULL;
+            }
+        }
         rc_decrement(ctx->page.DefaultRGB_cs, "pdfi_page_render");
         ctx->page.DefaultRGB_cs = NULL;
     }
     if (ctx->page.DefaultCMYK_cs != NULL) {
+        if (ctx->page.DefaultCMYK_cs->interpreter_data != NULL) {
+            pdf_obj *o = (pdf_obj *)(ctx->page.DefaultCMYK_cs->interpreter_data);
+            if (o != NULL && pdfi_type_of(o) == PDF_NAME) {
+                pdfi_countdown(o);
+                ctx->page.DefaultCMYK_cs->interpreter_data = NULL;
+            }
+        }
         rc_decrement(ctx->page.DefaultCMYK_cs, "pdfi_page_render");
         ctx->page.DefaultCMYK_cs = NULL;
     }
@@ -677,72 +860,16 @@ static void release_page_DefaultSpaces(pdf_context *ctx)
 
 static int setup_page_DefaultSpaces(pdf_context *ctx, pdf_dict *page_dict)
 {
-    int code = 0;
-    pdf_dict *resources_dict = NULL, *colorspaces_dict = NULL;
-    pdf_obj *DefaultSpace = NULL;
-
     /* First off, discard any dangling Default* colour spaces, just in case. */
     release_page_DefaultSpaces(ctx);
 
-    if (ctx->args.NOSUBSTDEVICECOLORS)
-        return 0;
+    return(pdfi_setup_DefaultSpaces(ctx, page_dict));
+}
 
-    /* Create any required DefaultGray, DefaultRGB or DefaultCMYK
-     * spaces.
-     */
-    code = pdfi_dict_knownget(ctx, page_dict, "Resources", (pdf_obj **)&resources_dict);
-    if (code > 0) {
-        code = pdfi_dict_knownget(ctx, resources_dict, "ColorSpace", (pdf_obj **)&colorspaces_dict);
-        if (code > 0) {
-            code = pdfi_dict_knownget(ctx, colorspaces_dict, "DefaultGray", &DefaultSpace);
-            if (code > 0) {
-                gs_color_space *pcs;
-                code = pdfi_create_colorspace(ctx, DefaultSpace, NULL, page_dict, &pcs, false);
-                /* If any given Default* space fails simply ignore it, we wil then use the Device
-                 * space instead, this is as per the spec.
-                 */
-                if (code >= 0) {
-                    ctx->page.DefaultGray_cs = pcs;
-                    pdfi_set_colour_callback(pcs, ctx, NULL);
-                }
-            }
-            pdfi_countdown(DefaultSpace);
-            DefaultSpace = NULL;
-            code = pdfi_dict_knownget(ctx, colorspaces_dict, "DefaultRGB", &DefaultSpace);
-            if (code > 0) {
-                gs_color_space *pcs;
-                code = pdfi_create_colorspace(ctx, DefaultSpace, NULL, page_dict, &pcs, false);
-                /* If any given Default* space fails simply ignore it, we wil then use the Device
-                 * space instead, this is as per the spec.
-                 */
-                if (code >= 0) {
-                    ctx->page.DefaultRGB_cs = pcs;
-                    pdfi_set_colour_callback(pcs, ctx, NULL);
-                }
-            }
-            pdfi_countdown(DefaultSpace);
-            DefaultSpace = NULL;
-            code = pdfi_dict_knownget(ctx, colorspaces_dict, "DefaultCMYK", &DefaultSpace);
-            if (code > 0) {
-                gs_color_space *pcs;
-                code = pdfi_create_colorspace(ctx, DefaultSpace, NULL, page_dict, &pcs, false);
-                /* If any given Default* space fails simply ignore it, we wil then use the Device
-                 * space instead, this is as per the spec.
-                 */
-                if (code >= 0) {
-                    ctx->page.DefaultCMYK_cs = pcs;
-                    pdfi_set_colour_callback(pcs, ctx, NULL);
-                }
-            }
-            pdfi_countdown(DefaultSpace);
-            DefaultSpace = NULL;
-        }
-    }
-
-    pdfi_countdown(DefaultSpace);
-    pdfi_countdown(resources_dict);
-    pdfi_countdown(colorspaces_dict);
-    return 0;
+static bool
+pdfi_pattern_purge_all_proc(gx_color_tile * ctile, void *proc_data)
+{
+    return true;
 }
 
 int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
@@ -766,16 +893,14 @@ int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
         char extra_info[256];
 
         page_dict_error = true;
-        gs_sprintf(extra_info, "*** ERROR: Page %ld has invalid Page dict, skipping\n", page_num+1);
+        gs_snprintf(extra_info, sizeof(extra_info), "*** ERROR: Page %ld has invalid Page dict, skipping\n", page_num+1);
         pdfi_set_error(ctx, 0, NULL, E_PDF_PAGEDICTERROR, "pdfi_page_render", extra_info);
         if (code != gs_error_VMerror && !ctx->args.pdfstoponerror)
             code = 0;
         goto exit3;
     }
 
-    pdfi_device_set_flags(ctx);
-
-    code = pdfi_check_page(ctx, page_dict, init_graphics);
+    code = pdfi_check_page(ctx, page_dict, NULL, NULL, init_graphics);
     if (code < 0)
         goto exit3;
 
@@ -790,8 +915,12 @@ int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
     }
 
     code = pdfi_dict_knownget_type(ctx, page_dict, "Group", PDF_DICT, (pdf_obj **)&group_dict);
+    /* Ignore errors retrieving the Group dictionary, we will just ignore it. This allows us
+     * to handle files such as Bug #705206 where the Group dictionary is a free object in a
+     * compressed object stream.
+     */
     if (code < 0)
-        goto exit3;
+        pdfi_set_error(ctx, 0, NULL, E_BAD_GROUP_DICT, "pdfi_page_render", NULL);
     if (group_dict != NULL)
         page_group_known = true;
 
@@ -829,7 +958,7 @@ int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
     }
 
     /* Write the various CropBox, TrimBox etc to the device */
-    pdfi_write_boxes_pdfmark(ctx, page_dict);
+    pdfi_pdfmark_write_boxes(ctx, page_dict);
 
     code = setup_page_DefaultSpaces(ctx, page_dict);
     if (code < 0)
@@ -866,7 +995,7 @@ int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
         /* We don't retain the PDF14 device */
         code = gs_push_pdf14trans_device(ctx->pgs, false, false, trans_depth, ctx->page.num_spots);
         if (code >= 0) {
-            if (page_group_known) {
+            if (ctx->page.has_transparency && page_group_known) {
                 code = pdfi_trans_begin_page_group(ctx, page_dict, group_dict);
                 /* If setting the page group failed for some reason, abandon the page group,
                  *  but continue with the page
@@ -894,13 +1023,14 @@ int pdfi_page_render(pdf_context *ctx, uint64_t page_num, bool init_graphics)
 
     code = pdfi_process_one_page(ctx, page_dict);
 
-    if (ctx->page.has_transparency && page_group_known) {
+    if (need_pdf14 && ctx->page.has_transparency && page_group_known) {
         code1 = pdfi_trans_end_group(ctx);
     }
 
     if (need_pdf14) {
         if (code1 < 0) {
             (void)gs_abort_pdf14trans_device(ctx->pgs);
+            code = code1;
             goto exit1;
         }
 
@@ -924,7 +1054,12 @@ exit3:
 
     release_page_DefaultSpaces(ctx);
 
-    if (code == 0 || (!ctx->args.pdfstoponerror && code != gs_error_stackoverflow))
+    /* Flush any pattern tiles. We don't want to (potentially) return to PostScript
+     * with any pattern tiles referencing our objects, in case the garbager runs.
+     */
+    gx_pattern_cache_winnow(gstate_pattern_cache(ctx->pgs), pdfi_pattern_purge_all_proc, NULL);
+
+    if (code == 0 || (!ctx->args.pdfstoponerror && code != gs_error_pdf_stackoverflow))
         if (!page_dict_error && ctx->finish_page != NULL)
             code = ctx->finish_page(ctx);
     return code;

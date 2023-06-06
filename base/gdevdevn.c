@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Example DeviceN process color model devices. */
@@ -236,6 +236,12 @@ check_pcm_and_separation_names(const gx_device * dev,
             color_component_number++;
         }
     }
+    /* For some devices, Tags is part of the process color model list. If so,
+     * that throws us off here since it is thrown at the end of the list. Adjust. */
+    if (device_encodes_tags(dev)) {
+        color_component_number--;
+    }
+
     return check_separation_names(dev, pparams, pname, name_size,
         component_type, color_component_number);
 }
@@ -477,7 +483,7 @@ devn_put_params(gx_device * pdev, gs_param_list * plist,
         return_error(gs_error_rangecheck);
     }
 
-    /* Separations are only valid with a subrtractive color model */
+    /* Separations are only valid with a subtractive color model */
     if (pdev->color_info.polarity == GX_CINFO_POLARITY_SUBTRACTIVE) {
         /*
          * Process the SeparationColorNames.  Remove any names that already
@@ -650,12 +656,19 @@ devn_put_params(gx_device * pdev, gs_param_list * plist,
                 pdev->color_info.num_components =
                         pdev->color_info.max_components;
 
+            if (pdev->color_info.num_components > pdev->num_planar_planes)
+                pdev->num_planar_planes = pdev->color_info.num_components;
+
             /*
              * See earlier comment about the depth and non compressed
              * pixel encoding.
              */
-            pdev->color_info.depth = bpc_to_depth(pdev->color_info.num_components,
-                                        pdevn_params->bitspercomponent);
+            if (pdev->num_planar_planes)
+                pdev->color_info.depth = bpc_to_depth(pdev->num_planar_planes,
+                                                      pdevn_params->bitspercomponent);
+            else
+                pdev->color_info.depth = bpc_to_depth(pdev->color_info.num_components,
+                                                      pdevn_params->bitspercomponent);
         }
     }
     return code;
@@ -698,6 +711,9 @@ devn_copy_params(gx_device * psrcdev, gx_device * pdesdev)
     /* Get pointers to the parameters */
     src_devn_params = dev_proc(psrcdev, ret_devn_params)(psrcdev);
     des_devn_params = dev_proc(pdesdev, ret_devn_params)(pdesdev);
+    if (src_devn_params == NULL || des_devn_params == NULL)
+        return gs_note_error(gs_error_undefined);
+
     /* First the easy items */
     des_devn_params->bitspercomponent = src_devn_params->bitspercomponent;
     des_devn_params->max_separations = src_devn_params->max_separations;
@@ -807,13 +823,10 @@ static bool devn_params_equal(const gs_devn_params *p1, const gs_devn_params *p2
     return true;
 }
 
-/*
- * Utility routine for handling DeviceN related parameters in a
- * standard raster printer type device.
- */
 int
-devn_printer_put_params(gx_device * pdev, gs_param_list * plist,
-    gs_devn_params * pdevn_params, equivalent_cmyk_color_params * pequiv_colors)
+devn_generic_put_params(gx_device *pdev, gs_param_list *plist,
+                        gs_devn_params *pdevn_params, equivalent_cmyk_color_params *pequiv_colors,
+                        int is_printer)
 {
     int code;
     /* Save current data in case we have a problem */
@@ -828,7 +841,7 @@ devn_printer_put_params(gx_device * pdev, gs_param_list * plist,
     code = devn_put_params(pdev, plist, pdevn_params, pequiv_colors);
 
     /* Check for default printer parameters */
-    if (code >= 0)
+    if (is_printer && code >= 0)
         code = gdev_prn_put_params(pdev, plist);
 
     /* If we have an error then restore original data. */
@@ -870,6 +883,17 @@ devn_printer_put_params(gx_device * pdev, gs_param_list * plist,
      */
     code = pdf14_put_devn_params(pdev, pdevn_params, plist);
     return code;
+}
+
+/*
+ * Utility routine for handling DeviceN related parameters in a
+ * standard raster printer type device.
+ */
+int
+devn_printer_put_params(gx_device *pdev, gs_param_list *plist,
+        gs_devn_params *pdevn_params, equivalent_cmyk_color_params *pequiv_colors)
+{
+    return devn_generic_put_params(pdev, plist, pdevn_params, pequiv_colors, 1);
 }
 
 /*
@@ -1373,7 +1397,7 @@ spotcmyk_print_page(gx_device_printer * pdev, gp_file * prn_stream)
 
     /* Open the output files for the spot colors */
     for(i = 0; i < nspot; i++) {
-        gs_sprintf(spotname, "%ss%d", pdevn->fname, i);
+        gs_snprintf(spotname, gp_file_name_sizeof, "%ss%d", pdevn->fname, i);
         code = gs_add_control_path(pdev->memory, gs_permit_file_writing, spotname);
         if (code < 0)
             goto prn_done;
@@ -1418,7 +1442,7 @@ spotcmyk_print_page(gx_device_printer * pdev, gp_file * prn_stream)
             goto prn_done;
     }
     for(i = 0; i < nspot; i++) {
-        gs_sprintf(spotname, "%ss%d", pdevn->fname, i);
+        gs_snprintf(spotname, gp_file_name_sizeof, "%ss%d", pdevn->fname, i);
         code = devn_write_pcx_file(pdev, spotname, 1, bpc, linelength[i]);
         if (code < 0)
             goto prn_done;
@@ -1765,7 +1789,7 @@ devn_write_pcx_file(gx_device_printer * pdev, char * filename, int ncomp,
         code = gs_note_error(gs_error_invalidfileaccess);
         goto done;
     }
-    gs_sprintf(outname, "%s.pcx", filename);
+    gs_snprintf(outname, gp_file_name_sizeof, "%s.pcx", filename);
     code = gs_add_control_path(pdev->memory, gs_permit_file_writing, outname);
     if (code < 0)
         goto done;

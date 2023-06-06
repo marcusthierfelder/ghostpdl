@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -20,6 +20,7 @@
 #include <stdlib.h> /* abs() */
 #include "gx.h"
 #include "gserrors.h"
+#include "gsutil.h"                /* for bytes_compare */
 #include "gscencs.h"
 #include "gscedata.h"
 #include "gsmatrix.h"
@@ -86,6 +87,30 @@ pdf_text_current_width(const gs_text_enum_t *pte, gs_point *pwidth)
         return gs_text_current_width(penum->pte_default, pwidth);
     return_error(gs_error_rangecheck); /* can't happen */
 }
+
+static void
+pdf_show_text_release(gs_text_enum_t *pte, client_name_t cname)
+{
+     gs_show_enum *const penum = (gs_show_enum *)pte;
+     gs_text_enum_procs_t *procs = (gs_text_enum_procs_t *)penum->procs;
+
+     penum->cc = 0;
+     if (penum->dev_cache2) {
+         gx_device_retain((gx_device *)penum->dev_cache2, false);
+         penum->dev_cache2 = 0;
+     }
+     if (penum->dev_cache) {
+         gx_device_retain((gx_device *)penum->dev_cache, false);
+         penum->dev_cache = 0;
+     }
+     if (penum->dev_null) {
+         gx_device_retain((gx_device *)penum->dev_null, false);
+         penum->dev_null = 0;
+     }
+     gx_default_text_release(pte, cname);
+     gs_free_object(penum->memory->non_gc_memory, procs, "pdf_show_text_release");
+}
+
 static int
 pdf_text_set_cache(gs_text_enum_t *pte, const double *pw,
                    gs_text_cache_control_t control)
@@ -302,6 +327,32 @@ pdf_text_release(gs_text_enum_t *pte, client_name_t cname)
     gx_device_pdf *pdev = (gx_device_pdf *)penum->dev;
     ocr_glyph_t *next;
 
+    /* Track the dominant text rotation. Ignore text outside the page (text_clipped) and
+     * any text that isn't drawn, unless it is drawn in text rendering mode 3 (invisible)
+     */
+    if (!penum->text_clipped && (penum->text.operation & TEXT_DO_DRAW || penum->pgs->text_rendering_mode == 3))
+    {
+        gs_matrix tmat;
+        gs_point p;
+        int i;
+        gs_font *font = (gs_font *)penum->current_font;
+        gs_text_params_t *const text = &pte->text;
+
+        gs_matrix_multiply(&font->FontMatrix, &ctm_only(penum->pgs), &tmat);
+        gs_distance_transform(1, 0, &tmat, &p);
+        if (p.x > fabs(p.y))
+            i = 0;
+        else if (p.x < -fabs(p.y))
+            i = 2;
+        else if (p.y > fabs(p.x))
+            i = 1;
+        else if (p.y < -fabs(p.x))
+            i = 3;
+        else
+            i = 4;
+        pdf_current_page(pdev)->text_rotation.counts[i] += text->size;
+    }
+
     if (penum->pte_default) {
         gs_text_release(NULL, penum->pte_default, cname);
         penum->pte_default = 0;
@@ -451,11 +502,16 @@ pdf_prepare_text_drawing(gx_device_pdf *const pdev, gs_text_enum_t *pte)
                 return code;
         }
 
-        if (!pdev->ForOPDFRead) {
+        /* For ps2write output, and for any 'type 3' font we need to write both the stroke and fill colours
+         * because we don't know whether the font will use stroke or fill, or both, and expect the
+         * current colour to work for both operations.
+         */
+        if (!pdev->ForOPDFRead && font->FontType != ft_user_defined && font->FontType != ft_CID_user_defined
+            && font->FontType != ft_PCL_user_defined && font->FontType != ft_GL2_531 && font->FontType != ft_PDF_user_defined) {
             if (pgs->text_rendering_mode != 3 && pgs->text_rendering_mode != 7) {
-                if (font->PaintType == 2) {
-                    /* Bit awkward, if the PaintType is 2 then we want to set the
-                     * current ie 'fill' colour, but as a stroke colour because we
+                if (font->PaintType == 2 || font->FontType == ft_GL2_stick_user_defined) {
+                    /* Bit awkward, if the PaintType is 2 (or its the PCL stick font, which is stroked)
+                     * then we want to set the current ie 'fill' colour, but as a stroke colour because we
                      * will later change the text rendering mode to 1 (stroke).
                      */
                     code = gx_set_dev_color(pgs);
@@ -514,6 +570,18 @@ pdf_prepare_text_drawing(gx_device_pdf *const pdev, gs_text_enum_t *pte)
     return 0;
 }
 
+static bool
+outline_list_includes(const gs_param_string_array *psa, const byte *chars,
+                    uint size)
+{
+    uint i;
+
+    for (i = 0; i < psa->size; ++i)
+        if (!bytes_compare(psa->data[i].data, psa->data[i].size, chars, size))
+            return true;
+    return false;
+}
+
 int
 gdev_pdf_text_begin(gx_device * dev, gs_gstate * pgs,
                     const gs_text_params_t *text, gs_font * font,
@@ -527,33 +595,22 @@ gdev_pdf_text_begin(gx_device * dev, gs_gstate * pgs,
     pdf_text_enum_t *penum;
     int code, user_defined = 0;
     gs_memory_t * mem = pgs->memory;
+    byte *chars_ptr = font->font_name.chars;
+    uint size = font->font_name.size;
+
+    while (pdf_has_subset_prefix(chars_ptr, size)) {
+        /* Strip off an existing subset prefix. */
+        chars_ptr += SUBSET_PREFIX_SIZE;
+        size -= SUBSET_PREFIX_SIZE;
+    }
 
     /* should we "flatten" the font to "normal" marking operations */
-    if (pdev->FlattenFonts) {
+    if (outline_list_includes(&pdev->params.AlwaysOutline, (const byte *)chars_ptr, size) ||
+        (pdev->FlattenFonts && !outline_list_includes(&pdev->params.NeverOutline, (const byte *)chars_ptr, size))
+        ) {
         font->dir->ccache.upper = 0;
         return gx_default_text_begin(dev, pgs, text, font,
                                      pcpath, ppte);
-    }
-
-    /* Track the dominant text rotation. */
-    {
-        gs_matrix tmat;
-        gs_point p;
-        int i;
-
-        gs_matrix_multiply(&font->FontMatrix, &ctm_only(pgs), &tmat);
-        gs_distance_transform(1, 0, &tmat, &p);
-        if (p.x > fabs(p.y))
-            i = 0;
-        else if (p.x < -fabs(p.y))
-            i = 2;
-        else if (p.y > fabs(p.x))
-            i = 1;
-        else if (p.y < -fabs(p.x))
-            i = 3;
-        else
-            i = 4;
-        pdf_current_page(pdev)->text_rotation.counts[i] += text->size;
     }
 
     pdev->last_charpath_op = 0;
@@ -649,13 +706,14 @@ gdev_pdf_text_begin(gx_device * dev, gs_gstate * pgs,
     penum->charproc_accum = false;
     pdev->accumulating_charproc = false;
     penum->cdevproc_callout = false;
+    penum->text_clipped = false;
     penum->returned.total_width.x = penum->returned.total_width.y = 0;
     penum->cgp = NULL;
     penum->returned.current_glyph = GS_NO_GLYPH;
     penum->output_char_code = GS_NO_CHAR;
     code = gs_text_enum_init((gs_text_enum_t *)penum, &pdf_text_procs,
                              dev, pgs, text, font, pcpath, mem);
-    penum->k_text_release = 1; /* early release of black_text_state */
+    penum->k_text_release = 1; /* early release of black_textvec_state */
 
     if (code < 0) {
         gs_free_object(mem, penum, "gdev_pdf_text_begin");
@@ -813,6 +871,9 @@ alloc_font_cache_elem_arrays(gx_device_pdf *pdev, pdf_font_cache_elem_t *e,
                             "pdf_attach_font_resource");
         gs_free_object(pdev->pdf_memory, e->real_widths,
                             "alloc_font_cache_elem_arrays");
+        /* Avoid risk of double freeing above if we come around again */
+        e->glyph_usage = NULL;
+        e->real_widths = NULL;
         return_error(gs_error_VMerror);
     }
     e->num_chars = num_chars;
@@ -2893,7 +2954,7 @@ pdf_choose_output_glyph_name(gx_device_pdf *pdev, pdf_text_enum_t *penum, gs_con
         p = (byte *)gs_alloc_string(pdev->pdf_memory, gnstr->size, "pdf_text_set_cache");
         if (p == NULL)
             return_error(gs_error_VMerror);
-        gs_sprintf(buf, "g%04x", (unsigned int)(glyph & 0xFFFF));
+        gs_snprintf(buf, sizeof(buf), "g%04x", (unsigned int)(glyph & 0xFFFF));
         memcpy(p, buf, 5);
         gnstr->data = p;
         *cleanup = true;
@@ -3392,12 +3453,18 @@ pdf_text_process(gs_text_enum_t *pte)
                  */
                 gs_show_enum psenum = *(gs_show_enum *)pte_default;
                 gs_gstate *pgs = (gs_gstate *)penum->pgs;
-                gs_text_enum_procs_t special_procs = *pte_default->procs;
+                gs_text_enum_procs_t *special_procs;
                 void (*save_proc)(gx_device *, gs_matrix *) = pdev->procs.get_initial_matrix;
                 gs_matrix m, savem;
 
-                special_procs.set_cache = pdf_text_set_cache;
-                pte_default->procs = &special_procs;
+                special_procs = (gs_text_enum_procs_t *)gs_alloc_bytes(pte_default->memory->non_gc_memory, sizeof(gs_text_enum_procs_t), "pdf_text_process");
+                if (special_procs == NULL)
+                    return_error(gs_error_VMerror);
+
+                *special_procs = *pte_default->procs;
+                special_procs->set_cache = pdf_text_set_cache;
+                special_procs->release = pdf_show_text_release;
+                pte_default->procs = special_procs;
 
                 {
                     /* We should not come here if we already have a cached character (except for the special case
@@ -3543,7 +3610,7 @@ pdf_text_process(gs_text_enum_t *pte)
                     /* end of code copied from show_cache_setup */
 
                     /* This copied from set_cache */
-                    code = gx_alloc_char_bits(pte->current_font->dir, dev, NULL,
+                    code = gx_alloc_char_bits(pte->current_font->dir, dev,
                                 0, 0, &log2_scale, 1, &cc);
                     if (code < 0)
                         return code;

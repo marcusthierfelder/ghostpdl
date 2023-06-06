@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -127,6 +127,10 @@ struct gx_device_memory_s {
         gx_color_index abcdefgh;	/* cache key */
         bits32 abcd, efgh;	/* cache value */
     } color64;
+    /* The following is used to indicate the device that 'owns' this one as
+     * a buffer device. Any dev_spec_ops that come to us should be forwarded
+     * up to that one if we can't cope with them. */
+    gx_device *owner;
     /* Following are only used for alpha buffers. */
     /* The client initializes those marked with $; */
     /* they don't change after initialization. */
@@ -166,6 +170,7 @@ extern_st(st_device_memory);
         { gx_no_color_index },	/* color48 */\
         { gx_no_color_index },	/* color56 */\
         { gx_no_color_index },	/* color64 */\
+        0,			/* owner */\
         { 0, 0 }, 0,		/* scale, log2_alpha_bits */\
         0, 0, 0, 0,		/* mapped_* */\
         gx_no_color_index	/* save_color */
@@ -178,13 +183,13 @@ extern_st(st_device_memory);
  */
 /* bits only */
 int gdev_mem_bits_size(const gx_device_memory *mdev, int width,
-                         int height, ulong *size);
+                         int height, size_t *size);
 /* line pointers only */
-ulong gdev_mem_line_ptrs_size(const gx_device_memory *mdev, int width,
+size_t gdev_mem_line_ptrs_size(const gx_device_memory *mdev, int width,
                               int height);
 /* bits + line pointers */
 int gdev_mem_data_size(const gx_device_memory *mdev, int width,
-                         int height, ulong *size);
+                         int height, size_t *size);
 
 #define gdev_mem_bitmap_size(mdev, size)\
   gdev_mem_data_size(mdev, (mdev)->width, (mdev)->height, size)
@@ -193,7 +198,7 @@ int gdev_mem_data_size(const gx_device_memory *mdev, int width,
  * Do the inverse computation: given the device width and a buffer size,
  * compute the maximum height.
  */
-int gdev_mem_max_height(const gx_device_memory * dev, int width, ulong size,
+int gdev_mem_max_height(const gx_device_memory * dev, int width, size_t size,
                 bool page_uses_transparency);
 
 /*
@@ -343,5 +348,9 @@ bool gs_device_is_abuf(const gx_device *);
 
 /* Check for getting the antialiasing bit depth */
 int alpha_buffer_bits(gs_gstate * pgs);
+
+/* Dev spec op handler for memory devices. */
+dev_proc_dev_spec_op(mem_spec_op);
+
 
 #endif /* gxdevmem_INCLUDED */

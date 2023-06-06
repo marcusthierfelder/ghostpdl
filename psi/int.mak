@@ -1,4 +1,4 @@
-# Copyright (C) 2001-2021 Artifex Software, Inc.
+# Copyright (C) 2001-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 #
 # (Platform-independent) makefile for PostScript and PDF language
@@ -291,7 +291,7 @@ $(PSOBJ)iinit.$(OBJ) : $(PSSRC)iinit.c $(GH) $(string__h)\
  $(ipacked_h) $(iparray_h) $(iutil_h) $(ivmspace_h) \
  $(gxiodev_h) $(store_h)\
  $(INT_MAK) $(MAKEDIRS)
-	$(PSCC) $(PSO_)iinit.$(OBJ) $(C_) $(PSSRC)iinit.c
+	$(PSCC) $(D_)GS_DOT_VERSION=$(GS_DOT_VERSION)$(_D) $(PSO_)iinit.$(OBJ) $(C_) $(PSSRC)iinit.c
 
 $(PSOBJ)iscan.$(OBJ) : $(PSSRC)iscan.c $(GH) $(memory__h)\
  $(btoken_h) $(dstack_h) $(ierrors_h) $(files_h)\
@@ -1808,11 +1808,12 @@ zpdfops_=$(PSOBJ)zpdfops.$(OBJ)
 $(PSD)pdfops.dev : $(ECHOGS_XE) $(zpdfops_) $(INT_MAK) $(MAKEDIRS)
 	$(SETMOD) $(PSD)pdfops $(zpdfops_)
 	$(ADDMOD) $(PSD)pdfops -oper zpdfops
+	$(ADDMOD) $(PSD)pdfops -oper zpdfops_old
 
 $(PSOBJ)zpdfops.$(OBJ) : $(PSSRC)zpdfops.c $(OP) $(MAKEFILE)\
  $(ghost_h) $(gsmchunk_h) $(oper_h) \
  $(igstate_h) $(istack_h) $(iutil_h) $(gspath_h) $(math__h) $(ialloc_h)\
- $(string__h) $(store_h) $(iminst_h) $(idstack_h) $(INT_MAK) $(MAKEDIRS)
+ $(igc_h) $(string__h) $(store_h) $(iminst_h) $(idstack_h) $(INT_MAK) $(MAKEDIRS)
 	$(PSCC) $(PSO_)zpdfops.$(OBJ) $(C_) $(PSSRC)zpdfops.c
 
 zutf8_=$(PSOBJ)zutf8.$(OBJ)

@@ -1,4 +1,4 @@
-% Copyright (C) 2001-2021 Artifex Software, Inc.
+% Copyright (C) 2001-2023 Artifex Software, Inc.
 % All Rights Reserved.
 %
 % This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 % of the license contained in the file LICENSE in this distribution.
 %
 % Refer to licensing information at http://www.artifex.com or contact
-% Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-% CA 94945, U.S.A., +1(415)492-9861, for further information.
+% Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+% CA 94129, USA, for further information.
 %
 
 % Initialization file for the interpreter.
@@ -34,7 +34,7 @@
 % Interpreter library version number
 % NOTE: the interpreter code requires that the first non-comment token
 % in this file be an integer, and that it match the compiled-in version!
-9560
+10020
 
 % Check the interpreter revision.
 dup revision ne
@@ -283,9 +283,7 @@ userdict /=string 256 string put
    (\)\n) revisiondate 10 mod revisiondate 10 idiv 10 mod (-)
    revisiondate 100 idiv 10 mod revisiondate 1000 idiv 10 mod (-)
    revisiondate 10000 idiv ( \()
-   revision 10 mod (.)
-   revision 1000 mod 10 idiv (.)
-   revision 1000 idiv ( )
+   .revisionstring ( )
    product
    counttomark
     { (%stdout) (w) file exch 0 .writecvp
@@ -2409,6 +2407,15 @@ currentdict /.locksafeglobal .undef
 
 %% ---------------- SAFER stuff END -------------------%%
 
+/UndefinePostScriptFilters {
+  [
+   /BCPEncode /TBCPEncode /PNGPredictorEncode /PNGPredictorDecode /PixelDifferenceDecode /PixelDifferenceEncode
+   /zlibEncode /zlibDecode /PWGDecode /eexecEncode /ArcfourEncode /PSStringEncode /BCPDecode
+   /OLDPDF where {/OLDPDF get not {/SHA256Encode /MD5Encode /AESDecode /JPXDecode /JBIG2Decode /ArcfourDecode /.EOFDecode} if} if
+  ]
+  {filterdict exch undef} forall
+} .bind executeonly def
+
 /UndefinePostScriptOperators {
   % This list is of operators which no longer appear to be used, and which we do not believe
   % to have any real use. For now we will undefine the operstors so they cannot easily be used
@@ -2547,6 +2554,7 @@ currentdict /.locksafeglobal .undef
   ]
   {statusdict exch .forceundef} forall
 
+  //systemdict /UndefinePostScriptFilters .forceundef
   //systemdict /UndefinePostScriptOperators .forceundef
 } .bind executeonly def % must be bound and hidden for .forceundef
 
@@ -2567,6 +2575,7 @@ currentdict /.locksafeglobal .undef
   SAFER {
     //systemdict /SAFERUndefinePostScriptOperators get exec
   } if
+  //systemdict /UndefinePostScriptFilters get exec
   //systemdict /UndefinePostScriptOperators get exec
   //systemdict /.forcecopynew .forceundef	% remove temptation
   //systemdict /.forceput .forceundef		% ditto
@@ -2654,6 +2663,7 @@ FontDirectory readonly pop
 % If we are using DELAYBIND we have to defer the undefinition
 % until .bindnow.
 DELAYBIND not {
+  //systemdict /UndefinePostScriptFilters get exec
   //systemdict /UndefinePostScriptOperators get exec
 } if
 end

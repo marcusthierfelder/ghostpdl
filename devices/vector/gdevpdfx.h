@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -503,7 +503,7 @@ typedef struct pdf_viewer_state_s {
     bool text_knockout; /* state.text_knockout */
     bool fill_overprint;
     bool stroke_overprint;
-    bool stroke_adjust; /* state.stroke_adjust */
+    int stroke_adjust; /* state.stroke_adjust */
     bool fill_used_process_color;
     bool stroke_used_process_color;
     gx_hl_saved_color saved_fill_color;
@@ -641,7 +641,7 @@ struct gx_device_pdf_s {
     gs_param_string OwnerPassword;
     gs_param_string UserPassword;
     uint KeyLength;
-    uint Permissions;
+    int32_t Permissions;
     uint EncryptionR;
     gs_param_string NoEncrypt;
     bool EncryptMetadata;
@@ -946,7 +946,7 @@ struct gx_device_pdf_s {
                                      * anything in the image processing routines.
                                      */
     float UserUnit;
-    pdf_OCR_usage UseOCR;                     /* Never, AsNeeded or Always */
+    pdf_OCR_usage UseOCR;           /* Never, AsNeeded or Always */
     gs_text_enum_t* OCRSaved;       /* Saved state of the text enumerator before rendering glyph bitmaps for later OCR */
     pdf_OCR_stage OCRStage;         /* Used to control a (sort of) state machine when using OCR to get a Unicode value for a glyph */
     int *OCRUnicode;                /* Used to pass back the Unicode value from the OCR engine to the text processing */
@@ -954,6 +954,11 @@ struct gx_device_pdf_s {
     gs_glyph OCR_glyph;             /* Passes the current glyph code from text processing to the image processing code when rendering glyph bitmaps for OCR */
     ocr_glyph_t *ocr_glyphs;        /* Records bitmaps and other data from text processing when doing OCR */
     gs_gstate **initial_pattern_states;
+    bool OmitInfoDate;              /* If true, do not emit CreationDate and ModDate in the Info dictionary and XMP Metadata (must not be true for PDF/X support) */
+    bool OmitXMP;                   /* If true, do not emit an XMP /Metadata block and do not reference it from the Catalog (must not be true for PDF/A output) */
+    bool OmitID;                    /* If true, do not emit a /ID array in the trailer dicionary (must not be true for encrypted files or PDF 2.0) */
+    bool ModifiesPageSize;          /* If true, the new PDF interpreter will not preserve *Box values (the media size has been modified, they will be incorrect) */
+    bool ModifiesPageOrder;         /* If true, the new PDF interpreter will not preserve Outlines or Dests, because they will refer to the wrong page number */
 };
 
 #define is_in_page(pdev)\
@@ -1269,6 +1274,7 @@ typedef struct pdf_lcvd_s {
     gx_device_memory *mask;
     gx_device_pdf *pdev;
     dev_t_proc_copy_color((*std_copy_color), gx_device);
+    dev_t_proc_copy_mono((*std_copy_mono), gx_device);
     dev_t_proc_fill_rectangle((*std_fill_rectangle), gx_device);
     dev_t_proc_close_device((*std_close_device), gx_device);
     dev_t_proc_get_clipping_box((*std_get_clipping_box), gx_device);
@@ -1276,6 +1282,7 @@ typedef struct pdf_lcvd_s {
     bool mask_is_empty;
     bool path_is_empty;
     bool mask_is_clean;
+    bool filled_trap;
     bool write_matrix;
     bool has_background;
     gs_matrix m;
@@ -1290,7 +1297,7 @@ typedef struct pdf_lcvd_s {
 
 int pdf_setup_masked_image_converter(gx_device_pdf *pdev, gs_memory_t *mem, const gs_matrix *m, pdf_lcvd_t **pcvd,
                                  bool need_mask, int x, int y, int w, int h, bool write_on_close);
-int pdf_dump_converted_image(gx_device_pdf *pdev, pdf_lcvd_t *cvd);
+int pdf_dump_converted_image(gx_device_pdf *pdev, pdf_lcvd_t *cvd, int for_pattern);
 void pdf_remove_masked_image_converter(gx_device_pdf *pdev, pdf_lcvd_t *cvd, bool need_mask);
 
 /* ------ Miscellaneous output ------ */

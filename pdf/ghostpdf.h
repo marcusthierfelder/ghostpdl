@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -22,6 +22,12 @@
 
 #define BUF_SIZE 2048
 
+/* Limit nesting of arrays and dictionaries. We don't want to allow this
+ * to be unbounded, because on exit we could end up exceeding the C execution stack
+ * if we get too deeply nested.
+ */
+#define MAX_NESTING_DEPTH 100
+
 #include "pdf_types.h"
 
 #if defined(MEMENTO)
@@ -29,7 +35,7 @@
 #endif
 
 #ifndef PDFI_LEAK_CHECK
-#define PDFI_LEAK_CHECK 1
+#define PDFI_LEAK_CHECK 0
 #endif
 
 /* A structure for setting/resetting the interpreter graphics state
@@ -54,84 +60,13 @@ typedef struct pdf_context_switch {
  * how to deal with this.
  */
 typedef enum pdf_error_e {
-    E_PDF_NOERROR,
-    E_PDF_NOHEADER,
-    E_PDF_NOHEADERVERSION,
-    E_PDF_NOSTARTXREF,
-    E_PDF_BADSTARTXREF,
-    E_PDF_BADXREFSTREAM,
-    E_PDF_BADXREF,
-    E_PDF_SHORTXREF,
-    E_PDF_MISSINGENDSTREAM,
-    E_PDF_UNKNOWNFILTER,
-    E_PDF_MISSINGWHITESPACE,
-    E_PDF_MALFORMEDNUMBER,
-    E_PDF_UNESCAPEDSTRING,
-    E_PDF_BADOBJNUMBER,
-    E_PDF_MISSINGENDOBJ,
-    E_PDF_TOKENERROR,
-    E_PDF_KEYWORDTOOLONG,
-    E_PDF_BADPAGETYPE,
-    E_PDF_CIRCULARREF,
-    E_PDF_UNREPAIRABLE,
-    E_PDF_REPAIRED,
-    E_PDF_BADSTREAM,
-    E_PDF_MISSINGOBJ,
-    E_PDF_BADPAGEDICT,
-    E_PDF_OUTOFMEMORY,
-    E_PDF_PAGEDICTERROR,
-    E_PDF_STACKUNDERFLOWERROR,
-    E_PDF_BADSTREAMDICT,
-    E_PDF_INHERITED_STREAM_RESOURCE,
-    E_PDF_DEREF_FREE_OBJ,
-    E_PDF_INVALID_TRANS_XOBJECT,
-    E_PDF_NO_SUBTYPE,
-    E_PDF_IMAGECOLOR_ERROR,
-    E_DICT_SELF_REFERENCE,
-    E_PDF_MAX_ERROR                     /* Must be last entry, add new errors immediately before this and update pdf_error_strings in ghostpdf.c */
+#include "pdf_errors.h"
+    E_PDF_MAX_ERROR       /* last entry */
 }pdf_error;
 
 typedef enum pdf_warning_e {
-    W_PDF_NOWARNING,
-    W_PDF_BAD_XREF_SIZE,
-    W_PDF_BAD_INLINEFILTER,
-    W_PDF_BAD_INLINECOLORSPACE,
-    W_PDF_BAD_INLINEIMAGEKEY,
-    W_PDF_IMAGE_ERROR,
-    W_PDF_BAD_IMAGEDICT,
-    W_PDF_TOOMANYQ,
-    W_PDF_TOOMANYq,
-    W_PDF_STACKGARBAGE,
-    W_PDF_STACKUNDERFLOW,
-    W_PDF_GROUPERROR,
-    W_PDF_OPINVALIDINTEXT,
-    W_PDF_NOTINCHARPROC,
-    W_PDF_NESTEDTEXTBLOCK,
-    W_PDF_ETNOTEXTBLOCK,
-    W_PDF_TEXTOPNOBT,
-    W_PDF_DEGENERATETM,
-    W_PDF_BADICC_USE_ALT,
-    W_PDF_BADICC_USECOMPS,
-    W_PDF_BADTRSWITCH,
-    W_PDF_BADSHADING,
-    W_PDF_BADPATTERN,
-    W_PDF_NONSTANDARD_OP,
-    W_PDF_NUM_EXPONENT,
-    W_PDF_STREAM_HAS_CONTENTS,
-    W_PDF_STREAM_BAD_DECODEPARMS,
-    W_PDF_MASK_ERROR,
-    W_PDF_ANNOT_AP_ERROR,
-    W_PDF_BAD_NAME_ESCAPE,
-    W_PDF_TYPECHECK,
-    W_PDF_BAD_TRAILER,
-    W_PDF_ANNOT_ERROR,
-    W_PDF_BAD_ICC_PROFILE_LINK,
-    W_PDF_OVERFLOW_REAL,
-    W_PDF_INVALID_REAL,
-    W_PDF_DEVICEN_USES_ALL,
-    W_PDF_BAD_MEDIABOX,
-    W_PDF_CA_OUTOFRANGE,
-    W_PDF_MAX_WARNING               /* Must be last entry, add new warnings immediately before this and update pdf_warning_strings in ghostpdf.c */
+#include "pdf_warnings.h"
+    W_PDF_MAX_WARNING     /* last entry */
 } pdf_warning;
 
 #define PDF_ERROR_BYTE_SIZE ((E_PDF_MAX_ERROR - 1) / (sizeof(char) * 8) + 1)
@@ -146,12 +81,11 @@ typedef enum pdf_crypt_filter_e {
     CRYPT_AESV3,  /* 256-bit AES */
 } pdf_crypt_filter;
 
-
-typedef enum pdf_overprint_control_e {
-    PDF_OVERPRINT_ENABLE = 0,/* Default */
-    PDF_OVERPRINT_DISABLE,
-    PDF_OVERPRINT_SIMULATE
-} pdf_overprint_control_t;
+typedef enum pdf_type3_d_type_e {
+    pdf_type3_d_none,
+    pdf_type3_d0,
+    pdf_type3_d1
+} pdf_type3_d_type;
 
 #define INITIAL_STACK_SIZE 32
 #define MAX_STACK_SIZE 524288
@@ -203,6 +137,8 @@ typedef struct cmd_args_s {
     bool preserveannots;
     char **preserveannottypes; /* Null terminated array of strings, NULL if none */
     bool preservemarkedcontent;
+    bool preserveembeddedfiles;
+    bool preservedocview;
     bool nouserunit;
     bool renderttnotdef;
     bool pdfinfo;
@@ -211,13 +147,15 @@ typedef struct cmd_args_s {
     bool ditherppi;
     int PDFX3Profile_num;
     char *UseOutputIntent;
-    pdf_overprint_control_t overprint_control;     /* Overprint -- enabled, disabled, simulated */
     char *PageList;
     bool QUIET;
     bool verbose_errors;
     bool verbose_warnings;
-    gs_string cidsubstpath;
-    gs_string cidsubstfont;
+    gs_string cidfsubstpath;
+    gs_string cidfsubstfont;
+    gs_string defaultfont;
+    bool defaultfont_is_name;
+
     bool ignoretounicode;
     bool nonativefontmap;
 } cmd_args_t;
@@ -304,8 +242,14 @@ typedef struct text_state_s {
     /* We need to know if we're in a type 3 CharProc which has executed a 'd1' operator.
      * Colour operators are technically invalid if we are in a 'd1' context and we must
      * ignore them.
+     * OSS-fuzz #45320 has a type 3 font with a BuildChar which has a 'RG' before the
+     * d1. This is (obviously) illegal because the spec says the first operation must
+     * be either a d0 or d1, in addition because of the graphics state depth hackery
+     * (see comments in pdf_d0() in pdf_font.c) this messes up the reference counting
+     * of the colour spaces, leading to a crash. So what was a boolean flag is now an
+     * enumerated type; pdf_type3_d_none, pdf_type3_d0 or pdf_type3_d1.
      */
-    bool CharProc_is_d1;
+    pdf_type3_d_type CharProc_d_type;
     /* If there is no current point when we do a BT we start by doing a 0 0 moveto in order
      * to establish an initial point. However, this also starts a path. When we finish
      * off with a BT we need to clear that path by doing a newpath, otherwise we might
@@ -338,6 +282,11 @@ typedef struct device_state_s {
     bool writepdfmarks;
     /* Should annotations be preserved or marked for current output device? */
     bool annotations_preserved;
+    /* Should we pass on PageLabels (using a device param, not a pdfmark) */
+    bool WantsPageLabels;
+    bool PassUserUnit;
+    bool ModifiesPageSize;
+    bool ModifiesPageOrder;
 } device_state_t;
 
 /*
@@ -388,6 +337,11 @@ typedef struct pdf_context_s
 
     /* Doing a high level form for pdfwrite (annotations) */
     bool PreservePDFForm;
+    /* If processing multiple files, the number of pages to add to /Page Destinations
+     * when handling Outlines and Annotations. This is the number of pages in all
+     * files completely processed so far.
+     */
+    int Pdfmark_InitialPage;
 
     /* Optional things from Root */
     pdf_dict *OCProperties;
@@ -406,6 +360,27 @@ typedef struct pdf_context_s
     gs_font_dir * font_dir;
     /* Obviously we need a graphics state */
     gs_gstate *pgs;
+
+    /* PDF really doesn't have a path in the graphics state. This is different to
+     * PostScript and has implications; changing the CTM partway through path
+     * construction affects path segments already accumulated. The path is
+     * unaffected by gsvae and grestore. Previously we've unwound any pending
+     * path and rerun it, this is causing problems so instead we'll do what
+     * Acrobat obviously does and build the path outside the graphics state
+     */
+    /* We make allocations in chunks for the path to avoid lots of little
+     * allocations, but we need to know where the end of the current allocation
+     * is so that we can tell if we would overflow and increase it.
+     */
+    char *PathSegments;
+    /* The current insertion point. */
+    char *PathSegmentsCurrent;
+    /* The current limit of the block */
+    char *PathSegmentsTop;
+    double *PathPts;
+    double *PathPtsCurrent;
+    double *PathPtsTop;
+
     /* set up by pdf_impl_set_device, this is the 'high water mark' for
      * restoring back to when we close a PDF file. This ensures the device
      * is correctly set up for any subesquent file to be run.
@@ -434,6 +409,8 @@ typedef struct pdf_context_s
     bool is_hybrid;
     /* If we've already repaired the file once, and it still fails, don't try to repair it again */
     bool repaired;
+    /* Repairing is true while the repair code is running, during this we ignore errors and warnings */
+    bool repairing;
 
     /* The HeaderVersion is the declared version from the PDF header, but this
      * can be overridden by later trailer dictionaries, so the FinalVersion is
@@ -457,10 +434,6 @@ typedef struct pdf_context_s
     pdf_dict *AcroForm;
     bool NeedAppearances; /* From AcroForm, if any */
 
-
-    /* Interpreter level PDF objects */
-    pdf_name *currentSpace;
-
     /* The interpreter operand stack */
     uint32_t stack_size;
     pdf_obj **stack_bot;
@@ -476,6 +449,12 @@ typedef struct pdf_context_s
     uint32_t loop_detection_size;
     uint32_t loop_detection_entries;
     uint64_t *loop_detection;
+
+    /* A counter for nesting of arrays and dictionaries. We don't want to allow this
+     * to be unbounded, because on exit we could end up exceeding the C execution stack
+     * if we get too deeply nested.
+     */
+    uint32_t object_nesting;
 
     /* Used to set the 'parent' stream of a stream that gets created by dereferencing
      * We should not need this but badly fromed PDF files can use Resources defined in
@@ -494,8 +473,10 @@ typedef struct pdf_context_s
     search_paths_t search_paths;
     pdf_dict *pdffontmap;
     pdf_dict *pdfnativefontmap; /* Explicit mappings take precedence, hence we need separate dictionaries */
+    pdf_dict *pdf_substitute_fonts;
     pdf_dict *pdfcidfmap;
 
+    gx_device *devbbox; /* Cached for use in pdfi_string_bbox */
     /* These function pointers can be replaced by ones intended to replicate
      * PostScript functionality when running inside the Ghostscript PostScript
      * interpreter.
@@ -537,8 +518,9 @@ int pdfi_set_input_stream(pdf_context *ctx, stream *stm);
 int pdfi_process_pdf_file(pdf_context *ctx, char *filename);
 int pdfi_prep_collection(pdf_context *ctx, uint64_t *TotalFiles, char ***names_array);
 int pdfi_close_pdf_file(pdf_context *ctx);
-void pdfi_gstate_from_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch, gsicc_profile_cache_t *profile_cache);
+int pdfi_gstate_from_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch, gsicc_profile_cache_t *profile_cache);
 void pdfi_gstate_to_PS(pdf_context *ctx, gs_gstate *pgs, pdfi_switch_t *i_switch);
+int pdfi_output_page_info(pdf_context *ctx, uint64_t page_num);
 
 void pdfi_report_errors(pdf_context *ctx);
 void pdfi_verbose_error(pdf_context *ctx, int gs_error, const char *gs_lib_function, int pdfi_error, const char *pdfi_function_name, const char *extra_info);
@@ -547,18 +529,28 @@ void pdfi_log_info(pdf_context *ctx, const char *pdfi_function, const char *info
 
 static inline void pdfi_set_error(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_error pdfi_error, const char *pdfi_function_name, const char *extra_info)
 {
-    if (pdfi_error != 0)
-        ctx->pdf_errors[pdfi_error / (sizeof(char) * 8)] |= 1 << pdfi_error % (sizeof(char) * 8);
-    if (ctx->args.verbose_errors)
-        pdfi_verbose_error(ctx, gs_error, gs_lib_function, pdfi_error, pdfi_function_name, extra_info);
+    /* ignore problems while repairing a file */
+    if (!ctx->repairing) {
+        if (pdfi_error != 0)
+            ctx->pdf_errors[pdfi_error / (sizeof(char) * 8)] |= 1 << pdfi_error % (sizeof(char) * 8);
+        if (ctx->args.verbose_errors)
+            pdfi_verbose_error(ctx, gs_error, gs_lib_function, pdfi_error, pdfi_function_name, extra_info);
+    }
 }
 
 static inline void pdfi_set_warning(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_warning pdfi_warning, const char *pdfi_function_name, const char *extra_info)
 {
-    ctx->pdf_warnings[pdfi_warning / (sizeof(char) * 8)] |= 1 << pdfi_warning % (sizeof(char) * 8);
-    if (ctx->args.verbose_warnings)
-        pdfi_verbose_warning(ctx, gs_error, gs_lib_function, pdfi_warning, pdfi_function_name, extra_info);
+    /* ignore problems while repairing a file */
+    if (!ctx->repairing) {
+        ctx->pdf_warnings[pdfi_warning / (sizeof(char) * 8)] |= 1 << pdfi_warning % (sizeof(char) * 8);
+        if (ctx->args.verbose_warnings)
+            pdfi_verbose_warning(ctx, gs_error, gs_lib_function, pdfi_warning, pdfi_function_name, extra_info);
+    }
 }
+
+/* Variants of the above that work in a printf style. */
+void pdfi_set_error_var(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_error pdfi_error, const char *pdfi_function_name, const char *fmt, ...);
+void pdfi_set_warning_var(pdf_context *ctx, int gs_error, const char *gs_lib_function, pdf_warning pdfi_warning, const char *pdfi_function_name, const char *fmt, ...);
 
 #define PURGE_CACHE_PER_PAGE 0
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -191,8 +191,10 @@ static void
 FF_stream_close(FT_Stream str)
 {
     stream *ps = (stream *) str->descriptor.pointer;
+    gs_memory_t *mem = ps->memory;
 
     (void)sclose(ps);
+    gs_free_object(mem, ps, "FF_stream_close");
 }
 
 extern const uint file_default_buffer_size;
@@ -642,14 +644,15 @@ load_glyph(gs_fapi_server * a_server, gs_fapi_font * a_fapi_font,
            data. (NOTE: if those do not match the original font's metrics, again, the hinting
            can be distorted)
          */
-        if (a_char_ref->metrics_type == gs_fapi_metrics_replace && !a_fapi_font->is_mtx_skipped)
-            face->ft_inc_int->object->metrics_type = gs_fapi_metrics_replace_width;
-        else
+        if (a_char_ref->metrics_type == gs_fapi_metrics_replace && !a_fapi_font->is_mtx_skipped) {
+            face->ft_inc_int->object->glyph_metrics_index = 0xFFFFFFFF;
+            delta.x = FT_MulFix(a_char_ref->sb_x >> 16, ft_face->size->metrics.x_scale);
+            delta.y = FT_MulFix(a_char_ref->sb_y >> 16, ft_face->size->metrics.y_scale);
+            FT_Vector_Transform( &delta, &face->ft_transform);
+        }
+        else {
             face->ft_inc_int->object->metrics_type = a_char_ref->metrics_type;
-
-        delta.x = FT_MulFix(a_char_ref->sb_x >> 16, ft_face->size->metrics.x_scale);
-        delta.y = FT_MulFix(a_char_ref->sb_y >> 16, ft_face->size->metrics.y_scale);
-        FT_Vector_Transform( &delta, &face->ft_transform);
+        }
     }
     else if (face->ft_inc_int)
         /* Make sure we don't leave this set to the last value, as we may then use inappropriate metrics values */
@@ -809,6 +812,10 @@ load_glyph(gs_fapi_server * a_server, gs_fapi_font * a_fapi_font,
                 FT_Render_Mode mode = FT_RENDER_MODE_MONO;
 
                 ft_error = FT_Render_Glyph(ft_face->glyph, mode);
+                if (ft_error != 0) {
+                    (*a_glyph) = NULL;
+                    return (gs_error_VMerror);
+                }
             }
             else {
                 (*a_glyph) = NULL;
@@ -837,7 +844,7 @@ load_glyph(gs_fapi_server * a_server, gs_fapi_font * a_fapi_font,
                     FF_free(s->ftmemory, bmg);
                 }
             }
-            else {
+            else if (ft_face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
                 FT_OutlineGlyph olg;
 
                 ft_error = FT_Get_Glyph(ft_face->glyph, (FT_Glyph *) & olg);
@@ -1272,31 +1279,45 @@ gs_fapi_ft_get_scaled_font(gs_fapi_server * a_server, gs_fapi_font * a_font,
                 /* Get the length of the TrueType data. */
                 unsigned long ms;
 
-                code = a_font->get_long(a_font, gs_fapi_font_feature_TT_size, 0, &ms);
-                if (code < 0)
-                    return code;
-                if (ms == 0)
-                    return_error(gs_error_invalidfont);
+                if (a_font->retrieve_tt_font != NULL) {
+                    code = a_font->retrieve_tt_font(a_font, &own_font_data, &ms);
+                    if (code == 0) {
+                        data_owned = false;
+                        open_args.memory_base = own_font_data;
+                        open_args.memory_size = own_font_data_len = ms;
+                    }
+                }
+                else
+                    code = gs_error_unregistered;
 
-                open_args.memory_size = (FT_Long)ms;
+                if (code < 0) {
+                    code = a_font->get_long(a_font, gs_fapi_font_feature_TT_size, 0, &ms);
+                    if (code < 0)
+                        return code;
+                    if (ms == 0)
+                        return_error(gs_error_invalidfont);
 
-                /* Load the TrueType data into a single buffer. */
-                open_args.memory_base = own_font_data =
-                    FF_alloc(s->ftmemory, open_args.memory_size);
-                if (!own_font_data)
-                    return_error(gs_error_VMerror);
+                    open_args.memory_size = (FT_Long)ms;
 
-                own_font_data_len = open_args.memory_size;
+                    /* Load the TrueType data into a single buffer. */
+                    open_args.memory_base = own_font_data =
+                        FF_alloc(s->ftmemory, open_args.memory_size);
+                    if (!own_font_data)
+                        return_error(gs_error_VMerror);
 
-                code = a_font->serialize_tt_font(a_font, own_font_data,
-                                      open_args.memory_size);
-                if (code < 0)
-                    return code;
+                    own_font_data_len = open_args.memory_size;
+
+                    code = a_font->serialize_tt_font(a_font, own_font_data,
+                                          open_args.memory_size);
+                    if (code < 0)
+                        return code;
+                }
 
                 /* We always load incrementally. */
                 ft_inc_int = new_inc_int(a_server, a_font);
                 if (!ft_inc_int) {
-                    FF_free(s->ftmemory, own_font_data);
+                    if (data_owned)
+                        FF_free(s->ftmemory, own_font_data);
                     return_error(gs_error_VMerror);
                 }
             }
@@ -1314,7 +1335,8 @@ gs_fapi_ft_get_scaled_font(gs_fapi_server * a_server, gs_fapi_font * a_font,
                              &ft_face);
             if (ft_error) {
                 delete_inc_int (a_server, ft_inc_int);
-                FF_free(s->ftmemory, own_font_data);
+                if (data_owned)
+                    FF_free(s->ftmemory, own_font_data);
                 return ft_to_gs_error(ft_error);
             }
         }
@@ -1324,7 +1346,8 @@ gs_fapi_ft_get_scaled_font(gs_fapi_server * a_server, gs_fapi_font * a_font,
                 new_face(a_server, ft_face, ft_inc_int, ft_strm,
                          own_font_data, own_font_data_len, data_owned);
             if (!face) {
-                FF_free(s->ftmemory, own_font_data);
+                if (data_owned)
+                    FF_free(s->ftmemory, own_font_data);
                 FT_Done_Face(ft_face);
                 delete_inc_int(a_server, ft_inc_int);
                 return_error(gs_error_VMerror);

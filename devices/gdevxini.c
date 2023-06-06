@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -88,7 +88,7 @@ gdev_x_open(gx_device_X * xdev)
     XSizeHints sizehints;
     char *window_id;
     XEvent event;
-    XVisualInfo xvinfo;
+    XVisualInfo xvinfo = { 0 };
     int nitems;
     XtAppContext app_con;
     Widget toplevel;
@@ -385,7 +385,7 @@ gdev_x_open(gx_device_X * xdev)
             char gstr[40];
             int bitmask;
 
-            gs_sprintf(gstr, "%dx%d+%d+%d", sizehints.width,
+            gs_snprintf(gstr, sizeof(gstr), "%dx%d+%d+%d", sizehints.width,
                     sizehints.height, sizehints.x, sizehints.y);
             bitmask = XWMGeometry(xdev->dpy, DefaultScreen(xdev->dpy),
                                   xdev->geometry, gstr, xdev->borderWidth,
@@ -906,16 +906,22 @@ gdev_x_put_params(gx_device * dev, gs_param_list * plist)
         /* Get work area */
         x_get_work_area(xdev, &area_width, &area_height);
 
-        /* Preserve screen resolution */
-        dev->x_pixels_per_inch = values.x_pixels_per_inch;
-        dev->y_pixels_per_inch = values.y_pixels_per_inch;
-        dev->HWResolution[0] = values.HWResolution[0];
-        dev->HWResolution[1] = values.HWResolution[1];
-
-        /* Recompute window size using screen resolution and available work area size*/
-        /* pixels */
-        dev->width = min(dev->width, area_width);
-        dev->height = min(dev->height, area_height);
+        /* Prioritize HWResolution over page size. If we can't fit the
+           page size at the requested resolution in the available screen
+           area, keep the resolution, clamp the page size.
+           This replaces the previous solution which refused requests to
+           change resolution at all.
+         */
+        if (dev->width > area_width) {
+            outprintf(dev->memory, "\nWARNING: page width %f at %f dpi exceeds available area, clamping width to %f\n",
+                                  ((dev->width / 72.0) * dev->HWResolution[0]), dev->HWResolution[0], ((area_width / 72) * dev->HWResolution[0]));
+            dev->width = area_width;
+        }
+        if (dev->height > area_height) {
+            outprintf(dev->memory, "\nWARNING: page height %f at %f dpi exceeds available area, clamping height to %f\n",
+                                  ((dev->height / 72.0) * dev->HWResolution[1]), dev->HWResolution[1], ((area_height / 72) * dev->HWResolution[1]));
+            dev->height = area_height;
+        }
 
         if (dev->width <= 0 || dev->height <= 0) {
             emprintf3(dev->memory, "Requested pagesize %d x %d not supported by %s device\n",
@@ -924,8 +930,8 @@ gdev_x_put_params(gx_device * dev, gs_param_list * plist)
         }
 
         /* points */
-        dev->MediaSize[0] = (float)dev->width / xdev->x_pixels_per_inch * 72;
-        dev->MediaSize[1] = (float)dev->height / xdev->y_pixels_per_inch * 72;
+        dev->MediaSize[0] = (float)dev->width / dev->HWResolution[0] * 72;
+        dev->MediaSize[1] = (float)dev->height / dev->HWResolution[1] * 72;
 
         dw = dev->width - values.width;
         dh = dev->height - values.height;

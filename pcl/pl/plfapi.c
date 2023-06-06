@@ -1,14 +1,16 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
    implied.
 
-   This software is distributed under license and may not be copied, modified
-   or distributed except as expressly authorized under the terms of that
-   license.  Refer to licensing information at http://www.artifex.com/
-   or contact Artifex Software, Inc.,  1305 Grant Avenue - Suite 200,
-   Novato, CA 94945, U.S.A., +1(415)492-9861, for further information.
+   This software is distributed under license and may not be copied,
+   modified or distributed except as expressly authorized under the terms
+   of the license contained in the file LICENSE in this distribution.
+
+   Refer to licensing information at http://www.artifex.com or contact
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Font API support  */
@@ -121,6 +123,7 @@ static const gs_fapi_font pl_ff_stub = {
     NULL,                       /* get_raw_subr */
     pl_fapi_get_glyph,          /* get_glyph */
     pl_fapi_serialize_tt_font,  /* serialize_tt_font */
+    NULL,                       /* retrieve_tt_font */
     NULL,                       /* get_charstring */
     NULL,                       /* get_charstring_name */
     pl_get_glyphdirectory_data, /* get_GlyphDirectory_data_ptr */

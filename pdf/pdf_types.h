@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #ifndef PDF_OBJ_TYPES
@@ -47,6 +47,7 @@ typedef enum pdf_obj_type_e {
     PDF_INDIRECT = 'R',
     PDF_BOOL = 'b',
     PDF_KEYWORD = 'K',
+    PDF_FAST_KEYWORD = 'k',
     PDF_FONT = 'F',
     PDF_STREAM = 'S',
     /* The following aren't PDF object types, but are objects we either want to
@@ -57,6 +58,7 @@ typedef enum pdf_obj_type_e {
     PDF_DICT_MARK = '<',
     PDF_PROC_MARK = '{',
     PDF_CMAP = 'C',
+    PDF_BUFFER = 'B',
     /* Lastly, for the benefit of duplicate colour space identification, we store either
      * a name for a colour space, or if there is no name, the context (we can get the
      * context from the name object if there is one). We need to be able to tell if a
@@ -109,14 +111,11 @@ typedef enum pdf_obj_type_e {
     uint16_t indirect_gen
 #endif
 
+#define PDF_NAME_DECLARED_LENGTH 4096
+
 typedef struct pdf_obj_s {
     pdf_obj_common;
 } pdf_obj;
-
-typedef struct pdf_bool_s {
-    pdf_obj_common;
-    bool value;
-} pdf_bool;
 
 typedef struct pdf_num_s {
     pdf_obj_common;
@@ -130,32 +129,39 @@ typedef struct pdf_num_s {
 typedef struct pdf_string_s {
     pdf_obj_common;
     uint32_t length;
-    unsigned char *data;
+    unsigned char data[PDF_NAME_DECLARED_LENGTH];
 } pdf_string;
 
 typedef struct pdf_name_s {
     pdf_obj_common;
     uint32_t length;
-    unsigned char *data;
+    unsigned char data[PDF_NAME_DECLARED_LENGTH];
 } pdf_name;
 
+/* For storing arbitrary byte arrays where the length may be
+   greater than PDF_NAME_DECLARED_LENGTH - prevents static
+   alalysis tools complaining if we just used pdf_string
+ */
+typedef struct pdf_buffer_s {
+    pdf_obj_common;
+    uint32_t length;
+    unsigned char *data;
+} pdf_buffer;
+
 typedef enum pdf_key_e {
-    TOKEN_NOT_A_KEYWORD,
-    TOKEN_OBJ,
-    TOKEN_ENDOBJ,
-    TOKEN_STREAM,
-    TOKEN_ENDSTREAM,
-    TOKEN_XREF,
-    TOKEN_STARTXREF,
-    TOKEN_TRAILER,
-    TOKEN_INVALID_KEY,
-}pdf_key;
+#include "pdf_tokens.h"
+        TOKEN__LAST_KEY,
+} pdf_key;
+
+#define PDF_NULL_OBJ ((pdf_obj *)(uintptr_t)TOKEN_null)
+#define PDF_TRUE_OBJ ((pdf_obj *)(uintptr_t)TOKEN_PDF_TRUE)
+#define PDF_FALSE_OBJ ((pdf_obj *)(uintptr_t)TOKEN_PDF_FALSE)
+#define PDF_TOKEN_AS_OBJ(token) ((pdf_obj *)(uintptr_t)(token))
 
 typedef struct pdf_keyword_s {
     pdf_obj_common;
     uint32_t length;
-    unsigned char *data;
-    pdf_key key;
+    unsigned char data[PDF_NAME_DECLARED_LENGTH];
 } pdf_keyword;
 
 typedef struct pdf_array_s {
@@ -164,13 +170,18 @@ typedef struct pdf_array_s {
     pdf_obj **values;
 } pdf_array;
 
+typedef struct pdf_dict_entry_s {
+    pdf_obj *key;
+    pdf_obj *value;
+} pdf_dict_entry;
+
 typedef struct pdf_dict_s {
     pdf_obj_common;
     uint64_t size;
     uint64_t entries;
-    pdf_obj **keys;
-    pdf_obj **values;
-    bool dict_written; /* Has dict been written (for pdfwrite) */
+    pdf_dict_entry *list;
+    bool dict_written;  /* Has dict been written (for pdfwrite) */
+    bool is_sorted;     /* true if the dictionary has been sorted by Key, for faster searching */
 } pdf_dict;
 
 typedef struct pdf_stream_s {
@@ -243,5 +254,30 @@ typedef struct pdf_c_stream_s {
     uint32_t unread_size;
     char unget_buffer[UNREAD_BUFFER_SIZE];
 } pdf_c_stream;
+
+#ifndef inline
+#define inline __inline
+#endif /* inline */
+
+#define pdfi_type_of(A) pdfi_type_of_imp((pdf_obj *)A)
+
+static inline pdf_obj_type pdfi_type_of_imp(pdf_obj *obj)
+{
+    if ((uintptr_t)obj > TOKEN__LAST_KEY)
+        return obj->type;
+    else if ((uintptr_t)obj == TOKEN_PDF_TRUE || (uintptr_t)obj == TOKEN_PDF_FALSE)
+        return PDF_BOOL;
+    else if ((uintptr_t)obj == TOKEN_null)
+        return PDF_NULL;
+    else
+        return PDF_FAST_KEYWORD;
+}
+
+static inline int pdf_object_num(pdf_obj *obj)
+{
+    if ((uintptr_t)obj > TOKEN__LAST_KEY)
+        return obj->object_num;
+    return 0;
+}
 
 #endif

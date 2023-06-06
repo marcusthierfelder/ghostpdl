@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -29,6 +29,7 @@
 #include "gsparams.h"
 
 #include "valgrind.h"
+#include <limits.h>
 
 /* ---------------- Statistics ---------------- */
 
@@ -237,7 +238,7 @@ cmd_write_band(gx_device_clist_writer * cldev, int band_min, int band_max,
             }
             pcl->head = pcl->tail = 0;
         }
-        if_debug0m('L', cldev->memory, "[L] adding terminator");
+        if_debug0m('L', cldev->memory, "[L] adding terminator\n");
         end  = cmd_count_op(cmd_end, 1, cldev->memory);
         cldev->page_info.io_procs->fwrite_chars(&end, 1, cfile);
         process_interrupts(cldev->memory);
@@ -346,8 +347,10 @@ cmd_put_list_op(gx_device_clist_writer * cldev, cmd_list * pcl, uint size)
     CMD_CHECK_LAST_OP_BLOCK_DEFINED(cldev);
 
     if (size + cmd_headroom > cldev->cend - dp) {
-        if ((cldev->error_code =
-             cmd_write_buffer(cldev, cmd_opv_end_run)) != 0 ||
+        cldev->error_code = cmd_write_buffer(cldev, cmd_opv_end_run);
+        /* error_code can come back as +ve as a warning that memory
+         * is getting tight. Don't fail on that. */
+        if (cldev->error_code < 0 ||
             (size + cmd_headroom > cldev->cend - cldev->cnext)) {
             if (cldev->error_code == 0)
                 cldev->error_code = gs_error_VMerror;
@@ -415,8 +418,15 @@ cmd_put_list_extended_op(gx_device_clist_writer *cldev, cmd_list *pcl, int op, u
 {
     byte *dp = cmd_put_list_op(cldev, pcl, size);
 
-    if (dp)
+    if (dp) {
         dp[1] = op;
+
+        if (gs_debug_c('L')) {
+            clist_debug_op(cldev->memory, dp);
+            dmlprintf1(cldev->memory, "[%u]\n", size);
+        }
+    }
+
     return dp;
 }
 
@@ -426,15 +436,25 @@ cmd_put_list_extended_op(gx_device_clist_writer *cldev, cmd_list *pcl, int op, u
 int
 cmd_get_buffer_space(gx_device_clist_writer * cldev, gx_clist_state * pcls, uint size)
 {
+    size_t z;
     CMD_CHECK_LAST_OP_BLOCK_DEFINED(cldev);
 
     if (size + cmd_headroom > cldev->cend - cldev->cnext) {
+        /* error_code can come back as +ve as a warning that memory
+         * is getting tight. Don't fail on that. */
         cldev->error_code = cmd_write_buffer(cldev, cmd_opv_end_run);
         if (cldev->error_code < 0) {
             return cldev->error_code;
         }
     }
-    return cldev->cend - cldev->cnext - cmd_headroom;
+    /* Calculate the available size as a size_t. If this won't fit in
+     * an int, clip the value. This is a bit crap, but it should be
+     * safe at least until we can change the clist to use size_t's
+     * where appropriate. */
+    z = cldev->cend - cldev->cnext - cmd_headroom;
+    if (z > INT_MAX)
+        z = INT_MAX;
+    return z;
 }
 
 #ifdef DEBUG
@@ -457,7 +477,10 @@ cmd_put_range_op(gx_device_clist_writer * cldev, int band_min, int band_max,
          band_min != cldev->band_range_min ||
          band_max != cldev->band_range_max)
         ) {
-        if ((cldev->error_code = cmd_write_buffer(cldev, cmd_opv_end_run)) != 0) {
+        cldev->error_code = cmd_write_buffer(cldev, cmd_opv_end_run);
+        /* error_code can come back as +ve as a warning that memory
+         * is getting tight. Don't fail on that. */
+        if (cldev->error_code < 0) {
             return NULL;
         }
         cldev->band_range_min = band_min;

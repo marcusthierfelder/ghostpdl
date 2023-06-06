@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -764,10 +764,10 @@ cmd_write_unknown(gx_device_clist_writer * cldev, gx_clist_state * pcls,
         } else {
             code = set_cmd_put_op(&dp, cldev, pcls, cmd_opv_set_color_space,
                 2 + sizeof(clist_icc_color_t));
-            memcpy(dp + 2, &(cldev->color_space.icc_info),
-                   sizeof(clist_icc_color_t));
             if (code < 0)
                 return code;
+            memcpy(dp + 2, &(cldev->color_space.icc_info),
+                   sizeof(clist_icc_color_t));
         }
         dp[1] = cldev->color_space.byte1;
         pcls->known |= color_space_known;
@@ -924,6 +924,28 @@ clist_fill_path(gx_device * dev, const gs_gstate * pgs, gx_path * ppath,
             re.y += re.height;
         } while (re.y < re.yend);
     }
+    return 0;
+}
+
+int clist_lock_pattern(gx_device * pdev, gs_gstate * pgs, gs_id pattern, int lock)
+{
+    gx_device_clist_writer * const cdev =
+        &((gx_device_clist *)pdev)->writer;
+    byte *dp;
+    int code;
+
+    /* We need to both lock now, and ensure that we lock on reading this back. */
+    code = gx_pattern_cache_entry_set_lock(pgs, pattern, lock);
+    if (code < 0)
+        return code;
+
+    code = set_cmd_put_all_op(&dp, cdev, cmd_opv_lock_pattern,
+                              1 + 1 + sizeof(pattern));
+
+    if (code < 0)
+        return code;
+    dp[1] = lock;
+    memcpy(dp+2, &pattern, sizeof(pattern));
     return 0;
 }
 
@@ -1563,6 +1585,47 @@ cmd_put_segment(cmd_segment_writer * psw, byte op,
 #define cmd_put_rlineto(psw, operands, notes)\
   cmd_put_segment(psw, cmd_opv_rlineto, operands, notes)
 
+
+/* Bug 693235 shows a problem with a 'large' stroke, that
+ * extends from almost the minimum extent permissible
+ * to almost the positive extent permissible. When we band
+ * that, and play it back, we subtract the y offset of the band
+ * from it, and that causes a very negative number to tip over
+ * to being a very positive number.
+ *
+ * To avoid this, we spot 'far out' entries in the path, and
+ * reduce them to being 'less far out'.
+ *
+ * We pick 'far out' as being outside the central 1/4 of our
+ * 2d plane. This is far larger than is ever going to be used
+ * by a real device (famous last words!).
+ *
+ * We reduce the lines by moving to 1/4 of the way along them.
+ *
+ * If we only ever actually want to render the central 1/16 of
+ * the plane (which is still far more generous than we'd expect),
+ * the reduced lines should be suitably small not to overflow,
+ * and yet not be reduced so much that the reduction is ever visible.
+ *
+ * In practice this gives us a 4 million x 4 million maximum
+ * resolution.
+ */
+
+static int
+far_out(gs_fixed_point out)
+{
+    return (out.y >= max_fixed/2 || out.y <= -(max_fixed/2) || out.x >= max_fixed/2 || out.x <= -(max_fixed/2));
+}
+
+static void
+reduce_line(fixed *m0, fixed *m1, fixed x0, fixed y0, fixed x1, fixed y1)
+{
+    /* We want to find m0, m1, 1/4 of the way from x0, y0 to x1, y1. */
+    /* Sacrifice 2 bits of accuracy to avoid overflow. */
+    *m0 = (x0/4) + 3*(x1/4);
+    *m1 = (y0/4) + 3*(y1/4);
+}
+
 /*
  * Write a path.  We go to a lot of trouble to omit segments that are
  * entirely outside the band.
@@ -1716,6 +1779,20 @@ cmd_put_path(gx_device_clist_writer * cldev, gx_clist_state * pcls,
                     }
                     /* If we skipped any segments, put out a moveto/lineto. */
                     if (side && ((open < 0) || (px != out.x || py != out.y || first_point()))) {
+                        if (far_out(out)) {
+                            /* out is far enough out that we have to worry about wrapping on playback. Reduce the extent. */
+                            if (open >= 0) {
+                                fixed mid[2];
+                                fixed m0, m1;
+                                reduce_line(&m0, &m1, out.x, out.y, px, py);
+                                mid[0] = m0 - px, mid[1] = m1 - py;
+                                code = cmd_put_rlineto(&writer, mid, out_notes);
+                                if (code < 0)
+                                    return code;
+                                px = m0, py = m1;
+                            }
+                            reduce_line(&out.x, &out.y, out.x, out.y, A, B);
+                        }
                         C = out.x - px, D = out.y - py;
                         if (open < 0) {
                             first = out;
@@ -1758,6 +1835,20 @@ cmd_put_path(gx_device_clist_writer * cldev, gx_clist_state * pcls,
                     }
                     /* If we skipped any segments, put out a moveto/lineto. */
                     if (side && ((open < 0) || (px != out.x || py != out.y || first_point()))) {
+                        if (far_out(out)) {
+                            /* out is far enough out that we have to worry about wrapping on playback. Reduce the extent. */
+                            if (open >= 0) {
+                                fixed mid[2];
+                                fixed m0, m1;
+                                reduce_line(&m0, &m1, out.x, out.y, px, py);
+                                mid[0] = m0 - px, mid[1] = m1 - py;
+                                code = cmd_put_rlineto(&writer, mid, out_notes);
+                                if (code < 0)
+                                    return code;
+                                px = m0, py = m1;
+                            }
+                            reduce_line(&out.x, &out.y, out.x, out.y, A, B);
+                        }
                         C = out.x - px, D = out.y - py;
                         if (open < 0) {
                             first = out;
@@ -1805,6 +1896,20 @@ cmd_put_path(gx_device_clist_writer * cldev, gx_clist_state * pcls,
                 /* we skipped any segments at the beginning of the path. */
               close:if (side != start_side) {	/* If we skipped any segments, put out a moveto/lineto. */
                     if (side && (px != out.x || py != out.y || first_point())) {
+                        if (far_out(out)) {
+                            /* out is far enough out that we have to worry about wrapping on playback. Reduce the extent. */
+                            if (open >= 0) {
+                                fixed mid[2];
+                                fixed m0, m1;
+                                reduce_line(&m0, &m1, out.x, out.y, px, py);
+                                mid[0] = m0 - px, mid[1] = m1 - py;
+                                code = cmd_put_rlineto(&writer, mid, out_notes);
+                                if (code < 0)
+                                    return code;
+                                px = m0, py = m1;
+                            }
+                            reduce_line(&out.x, &out.y, out.x, out.y, A, B);
+                        }
                         C = out.x - px, D = out.y - py;
                         code = cmd_put_rlineto(&writer, &C, out_notes);
                         if (code < 0)

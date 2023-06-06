@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -132,6 +132,7 @@ extern const char *cmd_extend_op_names[256];
 dev_proc_fill_path(clist_fill_path);
 dev_proc_stroke_path(clist_stroke_path);
 dev_proc_fill_stroke_path(clist_fill_stroke_path);
+dev_proc_lock_pattern(clist_lock_pattern);
 dev_proc_fill_parallelogram(clist_fill_parallelogram);
 dev_proc_fill_triangle(clist_fill_triangle);
 

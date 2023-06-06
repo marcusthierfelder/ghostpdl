@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -74,7 +74,7 @@ halftone_callback(cal_halftone_data_t *ht, void *arg)
     gx_color_index dev_white = gx_device_white(dev);
     gx_color_index dev_black = gx_device_black(dev);
 
-    if (dev->is_planar) {
+    if (dev->num_planar_planes) {
         (*dev_proc(dev, copy_planes)) (dev, ht->data, ht->x + (ht->offset_x<<3), ht->raster,
             gx_no_bitmap_id, ht->x, ht->y, ht->w, ht->h,
             ht->plane_raster);
@@ -170,7 +170,7 @@ gs_image_class_3_mono(gx_image_enum * penum, irender_proc_t *render_fn)
     gsicc_rendering_param_t rendering_params;
     cmm_dev_profile_t *dev_profile;
     bool dev_color_ok = false;
-    bool is_planar_dev = penum->dev->is_planar;
+    bool is_planar_dev = penum->dev->num_planar_planes;
 
     if (penum->spp == 1) {
         /* At this point in time, only use the ht approach if our device

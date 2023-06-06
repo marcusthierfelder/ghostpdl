@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* dictionary handling for the PDF interpreter */
@@ -24,6 +24,9 @@
 #include "pdf_loop_detect.h"
 #include "pdf_misc.h"
 
+static int pdfi_dict_find(pdf_context *ctx, pdf_dict *d, const char *Key, bool sort);
+static int pdfi_dict_find_key(pdf_context *ctx, pdf_dict *d, const pdf_name *Key, bool sort);
+
 void pdfi_free_dict(pdf_obj *o)
 {
     pdf_dict *d = (pdf_dict *)o;
@@ -34,15 +37,14 @@ void pdfi_free_dict(pdf_obj *o)
 
     for (i=0;i < d->entries;i++) {
 #if DEBUG_DICT
-        name = (pdf_name *)d->keys[i];
+        name = (pdf_name *)d->list[i].key;
 #endif
-        if (d->values[i] != NULL)
-            pdfi_countdown(d->values[i]);
-        if (d->keys[i] != NULL)
-            pdfi_countdown(d->keys[i]);
+        if (d->list[i].value != NULL)
+            pdfi_countdown(d->list[i].value);
+        if (d->list[i].key != NULL)
+            pdfi_countdown(d->list[i].key);
     }
-    gs_free_object(OBJ_MEMORY(d), d->keys, "pdf interpreter free dictionary keys");
-    gs_free_object(OBJ_MEMORY(d), d->values, "pdf interpreter free dictioanry values");
+    gs_free_object(OBJ_MEMORY(d), d->list, "pdf interpreter free dictionary key/values");
     gs_free_object(OBJ_MEMORY(d), d, "pdf interpreter free dictionary");
 }
 
@@ -55,31 +57,22 @@ static int pdfi_dict_delete_inner(pdf_context *ctx, pdf_dict *d, pdf_name *n, co
     pdf_name *name;
 #endif
 
-    for (i=0;i < d->entries;i++) {
-#if DEBUG_DICT
-        name = (pdf_name *)d->keys[i];
-#endif
-        if (n != NULL) {
-            if (pdfi_name_cmp(n, (pdf_name *)d->keys[i]) == 0)
-                break;
-        } else {
-            if (pdfi_name_is((pdf_name *)d->keys[i], str))
-                break;
-        }
+    if (n != NULL)
+        i = pdfi_dict_find_key(ctx, d, (const pdf_name *)n, false);
+    else
+        i = pdfi_dict_find(ctx, d, str, false);
 
-    }
-    if (i >= d->entries)
-        return_error(gs_error_undefined);
+    if (i < 0)
+        return i;
 
-    pdfi_countdown(d->keys[i]);
-    pdfi_countdown(d->values[i]);
-    for(  ;i < d->entries - 1;i++) {
-        d->keys[i] = d->keys[i + 1];
-        d->values[i] = d->values[i + 1];
-    }
-    d->keys[i] = NULL;
-    d->values[i] = NULL;
+    pdfi_countdown(d->list[i].key);
+    pdfi_countdown(d->list[i].value);
     d->entries--;
+    if (i != d->entries)
+        memmove(&d->list[i], &d->list[i+1], (d->entries - i) * sizeof(d->list[0]));
+    d->list[d->entries].key = NULL;
+    d->list[d->entries].value = NULL;
+    d->is_sorted = false;
     return 0;
 }
 
@@ -147,16 +140,16 @@ int pdfi_dict_from_stack(pdf_context *ctx, uint32_t indirect_num, uint32_t indir
         i = (index / 2) - 1;
 
         /* In PDF keys are *required* to be names, so we ought to check that here */
-        if (((pdf_obj *)ctx->stack_top[-2])->type == PDF_NAME) {
-            d->keys[i] = ctx->stack_top[-2];
-            pdfi_countup(d->keys[i]);
+        if (pdfi_type_of((pdf_obj *)ctx->stack_top[-2]) == PDF_NAME) {
+            d->list[i].key = ctx->stack_top[-2];
+            pdfi_countup(d->list[i].key);
 #if DEBUG_DICT
-            key = (pdf_name *)d->keys[i];
+            key = (pdf_name *)d->list[i].key;
 #endif
-            d->values[i] = ctx->stack_top[-1];
-            pdfi_countup(d->values[i]);
+            d->list[i].value = ctx->stack_top[-1];
+            pdfi_countup(d->list[i].value);
         } else {
-            if (convert_string_keys && ((pdf_obj *)ctx->stack_top[-2])->type == PDF_STRING) {
+            if (convert_string_keys && (pdfi_type_of((pdf_obj *)ctx->stack_top[-2]) == PDF_STRING)) {
                 pdf_name *n;
                 code = pdfi_dict_name_from_string(ctx, (pdf_string *)ctx->stack_top[-2], &n);
                 if (code < 0) {
@@ -164,9 +157,9 @@ int pdfi_dict_from_stack(pdf_context *ctx, uint32_t indirect_num, uint32_t indir
                     pdfi_clear_to_mark(ctx);
                     return_error(gs_error_typecheck);
                 }
-                d->keys[i] = (pdf_obj *)n; /* pdfi_dict_name_from_string() sets refcnt to 1 */
-                d->values[i] = ctx->stack_top[-1];
-                pdfi_countup(d->values[i]);
+                d->list[i].key = (pdf_obj *)n; /* pdfi_dict_name_from_string() sets refcnt to 1 */
+                d->list[i].value = ctx->stack_top[-1];
+                pdfi_countup(d->list[i].value);
             }
             else {
                 pdfi_free_dict((pdf_obj *)d);
@@ -205,61 +198,171 @@ pdfi_dict_get2(pdf_context *ctx, pdf_dict *d, const char *Key1,
 {
     int code;
 
-    code = pdfi_dict_get(ctx, d, Key1, o);
-    if (code == gs_error_undefined)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. Assume abbreviated names are shorter :-) */
+    if (strlen(Key1) < strlen(Key2)) {
+        code = pdfi_dict_get(ctx, d, Key1, o);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get(ctx, d, Key2, o);
+    } else {
         code = pdfi_dict_get(ctx, d, Key2, o);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get(ctx, d, Key1, o);
+    }
     return code;
+}
+
+static int pdfi_dict_compare_entry(const void *a, const void *b)
+{
+    pdf_name *key_a = (pdf_name *)((pdf_dict_entry *)a)->key, *key_b = (pdf_name *)((pdf_dict_entry *)b)->key;
+
+    if (key_a == NULL) {
+        if (key_b == NULL)
+            return 0;
+        else
+            return 1;
+    }
+
+    if (key_b == NULL)
+        return -1;
+
+    if (key_a->length != key_b->length)
+        return key_a->length - key_b->length;
+
+    return strncmp((const char *)key_a->data, (const char *)key_b->data, key_a->length);
+}
+
+static int pdfi_dict_find_sorted(pdf_context *ctx, pdf_dict *d, const char *Key)
+{
+    int start = 0, end = d->size - 1, middle = 0, keylen = strlen(Key);
+    pdf_name *test_key;
+
+    while (start <= end) {
+        middle = start + (end - start) / 2;
+        test_key = (pdf_name *)d->list[middle].key;
+
+        /* Sorting pushes unused key/values (NULL) to the end of the dictionary */
+        if (test_key == NULL) {
+            end = middle - 1;
+            continue;
+        }
+
+        if (test_key->length == keylen) {
+            int result = strncmp((const char *)test_key->data, Key, keylen);
+
+            if (result == 0)
+                return middle;
+            if (result < 0)
+                start = middle + 1;
+            else
+                end = middle - 1;
+        } else {
+            if (test_key->length < keylen)
+                start = middle + 1;
+            else
+                end = middle -1;
+        }
+    }
+    return gs_note_error(gs_error_undefined);
+}
+
+static int pdfi_dict_find_unsorted(pdf_context *ctx, pdf_dict *d, const char *Key)
+{
+    int i;
+    pdf_name *t;
+
+    for (i=0;i< d->entries;i++) {
+        t = (pdf_name *)d->list[i].key;
+
+        if (t && pdfi_type_of(t) == PDF_NAME) {
+            if (pdfi_name_is((pdf_name *)t, Key)) {
+                return i;
+            }
+        }
+    }
+    return_error(gs_error_undefined);
+}
+
+static int pdfi_dict_find(pdf_context *ctx, pdf_dict *d, const char *Key, bool sort)
+{
+    if (!d->is_sorted) {
+        if (d->entries > 32 && sort) {
+            qsort(d->list, d->size, sizeof(pdf_dict_entry), pdfi_dict_compare_entry);
+            d->is_sorted = true;
+            return pdfi_dict_find_sorted(ctx, d, Key);
+        } else
+            return pdfi_dict_find_unsorted(ctx, d, Key);
+    } else
+        return pdfi_dict_find_sorted(ctx, d, Key);
+}
+
+static int pdfi_dict_find_key(pdf_context *ctx, pdf_dict *d, const pdf_name *Key, bool sort)
+{
+    char *Test = NULL;
+    int index = 0;
+
+    Test = (char *)gs_alloc_bytes(ctx->memory, Key->length + 1, "pdfi_dict_find_key");
+    if (Test == NULL)
+        return_error(gs_error_VMerror);
+
+    memcpy(Test, Key->data, Key->length);
+    Test[Key->length] = 0x00;
+
+    index = pdfi_dict_find(ctx, d, Test, sort);
+
+    gs_free_object(ctx->memory, Test, "pdfi_dict_find_key");
+    return index;
 }
 
 /* The object returned by pdfi_dict_get has its reference count incremented by 1 to
  * indicate the reference now held by the caller, in **o.
  */
-int pdfi_dict_get(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj **o)
+int pdfi_dict_get_common(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj **o, bool cache)
 {
-    int i=0, code;
-    pdf_name *t;
+    int index = 0, code = 0;
 
     *o = NULL;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    index = pdfi_dict_find(ctx, d, Key, true);
+    if (index < 0)
+        return index;
 
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_is((pdf_name *)t, Key)) {
-                if (d->values[i]->type == PDF_INDIRECT) {
-                    pdf_indirect_ref *r = (pdf_indirect_ref *)d->values[i];
+    if (pdfi_type_of(d->list[index].value) == PDF_INDIRECT) {
+        pdf_indirect_ref *r = (pdf_indirect_ref *)d->list[index].value;
 
-                    if (r->ref_object_num == d->object_num)
-                        return_error(gs_error_circular_reference);
+        if (r->ref_object_num == d->object_num)
+            return_error(gs_error_circular_reference);
 
-                    code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, o);
-                    if (code < 0)
-                        return code;
-                    /* The file Bug690138.pdf has font dictionaries which contain ToUnicode keys where
-                     * the value is an indirect reference to the same font object. If we replace the
-                     * indirect reference in the dictionary with the font dictionary it becomes self
-                     * referencing and never counts down to 0, leading to a memory leak.
-                     * This is clearly an error, so flag it and don't replace the indirect reference.
-                     */
-                    if ((*o)->object_num == 0 || (*o)->object_num != d->object_num)
-                    {
-                        pdfi_countdown(d->values[i]);
-                        d->values[i] = *o;
-                    } else {
-                        pdfi_set_error(ctx, 0, NULL, E_DICT_SELF_REFERENCE, "pdfi_dict_get", NULL);
-                        return 0;
-                    }
-                }
-                *o = d->values[i];
-                pdfi_countup(*o);
-                return 0;
-            }
+        if (cache)
+            code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, o);
+        else
+            code = pdfi_deref_loop_detect_nocache(ctx, r->ref_object_num, r->ref_generation_num, o);
+        if (code < 0)
+            return code;
+        /* The file Bug690138.pdf has font dictionaries which contain ToUnicode keys where
+         * the value is an indirect reference to the same font object. If we replace the
+         * indirect reference in the dictionary with the font dictionary it becomes self
+         * referencing and never counts down to 0, leading to a memory leak.
+         * This is clearly an error, so flag it and don't replace the indirect reference.
+         */
+        if ((*o) < (pdf_obj *)(uintptr_t)(TOKEN__LAST_KEY)) {
+            /* "FAST" object, therefore can't be a problem. */
+            pdfi_countdown(d->list[index].value);
+            d->list[index].value = *o;
+        } else if ((*o)->object_num == 0 || (*o)->object_num != d->object_num) {
+            pdfi_countdown(d->list[index].value);
+            d->list[index].value = *o;
+        } else {
+            pdfi_set_error(ctx, 0, NULL, E_DICT_SELF_REFERENCE, "pdfi_dict_get", NULL);
+            return 0;
         }
     }
-    return_error(gs_error_undefined);
+    *o = d->list[index].value;
+    pdfi_countup(*o);
+
+    return code;
 }
 
 /* Get object from dict without resolving indirect references
@@ -267,26 +370,20 @@ int pdfi_dict_get(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj **o)
  */
 int pdfi_dict_get_no_deref(pdf_context *ctx, pdf_dict *d, const pdf_name *Key, pdf_obj **o)
 {
-    int i=0;
-    pdf_name *t;
+    int index=0;
 
     *o = NULL;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    index = pdfi_dict_find_key(ctx, d, Key, true);
+    if (index < 0)
+        return index;
 
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_cmp((pdf_name *)t, Key)== 0) {
-                *o = d->values[i];
-                pdfi_countup(*o);
-                return 0;
-            }
-        }
-    }
-    return_error(gs_error_undefined);
+    *o = d->list[index].value;
+    pdfi_countup(*o);
+    return 0;
 }
 
 /* Get by pdf_name rather than by char *
@@ -295,64 +392,52 @@ int pdfi_dict_get_no_deref(pdf_context *ctx, pdf_dict *d, const pdf_name *Key, p
  */
 int pdfi_dict_get_by_key(pdf_context *ctx, pdf_dict *d, const pdf_name *Key, pdf_obj **o)
 {
-    int i=0, code;
-    pdf_name *t;
+    int index=0, code = 0;
 
     *o = NULL;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    index = pdfi_dict_find_key(ctx, d, Key, true);
+    if (index < 0)
+        return index;
 
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_cmp((pdf_name *)t, Key)== 0) {
-                if (d->values[i]->type == PDF_INDIRECT) {
-                    pdf_indirect_ref *r = (pdf_indirect_ref *)d->values[i];
+    if (pdfi_type_of(d->list[index].value) == PDF_INDIRECT) {
+        pdf_indirect_ref *r = (pdf_indirect_ref *)d->list[index].value;
 
-                    code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, o);
-                    if (code < 0)
-                        return code;
-                    pdfi_countdown(d->values[i]);
-                    d->values[i] = *o;
-                }
-                *o = d->values[i];
-                pdfi_countup(*o);
-                return 0;
-            }
-        }
+        code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, o);
+        if (code < 0)
+            return code;
+        pdfi_countdown(d->list[index].value);
+        d->list[index].value = *o;
     }
-    return_error(gs_error_undefined);
+    *o = d->list[index].value;
+    pdfi_countup(*o);
+    return 0;
 }
 
 /* Get indirect reference without de-referencing it */
 int pdfi_dict_get_ref(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_indirect_ref **o)
 {
-    int i=0;
-    pdf_name *t;
+    int index=0;
 
     *o = NULL;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    index = pdfi_dict_find(ctx, d, Key, true);
+    if (index < 0)
+        return index;
 
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_is((pdf_name *)t, Key)) {
-                if (d->values[i]->type == PDF_INDIRECT) {
-                    *o = (pdf_indirect_ref *)d->values[i];
-                    pdfi_countup(*o);
-                    return 0;
-                } else {
-                    return_error(gs_error_typecheck);
-                }
-            }
-        }
+    if (pdfi_type_of(d->list[index].value) == PDF_INDIRECT) {
+        *o = (pdf_indirect_ref *)d->list[index].value;
+        pdfi_countup(*o);
+        return 0;
+    } else {
+        return_error(gs_error_typecheck);
     }
-    return_error(gs_error_undefined);
 }
 
 /* As per pdfi_dict_get(), but doesn't replace an indirect reference in a dictionary with a
@@ -365,42 +450,32 @@ int pdfi_dict_get_ref(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_indire
 static int pdfi_dict_get_no_store_R_inner(pdf_context *ctx, pdf_dict *d, const char *strKey,
                                           const pdf_name *nameKey, pdf_obj **o)
 {
-    int i=0, code;
-    pdf_name *t;
-    bool match = false;
+    int index=0, code = 0;
 
     *o = NULL;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    if (strKey == NULL)
+        index = pdfi_dict_find_key(ctx, d, nameKey, true);
+    else
+        index = pdfi_dict_find(ctx, d, strKey, true);
 
-        if (t && t->type == PDF_NAME) {
-            if (strKey != NULL) {
-                if (pdfi_name_is(t, strKey))
-                    match = true;
-            } else {
-                if (!pdfi_name_cmp(t, nameKey))
-                    match = true;
-            }
-            if (match) {
-                if (d->values[i]->type == PDF_INDIRECT) {
-                    pdf_indirect_ref *r = (pdf_indirect_ref *)d->values[i];
+    if (index < 0)
+        return index;
 
-                    code = pdfi_dereference(ctx, r->ref_object_num, r->ref_generation_num, o);
-                    if (code < 0)
-                        return code;
-                } else {
-                    *o = d->values[i];
-                    pdfi_countup(*o);
-                }
-                return 0;
-            }
-        }
+    if (pdfi_type_of(d->list[index].value) == PDF_INDIRECT) {
+        pdf_indirect_ref *r = (pdf_indirect_ref *)d->list[index].value;
+
+        code = pdfi_dereference(ctx, r->ref_object_num, r->ref_generation_num, o);
+        if (code < 0)
+            return code;
+    } else {
+        *o = d->list[index].value;
+        pdfi_countup(*o);
     }
-    return_error(gs_error_undefined);
+    return 0;
 }
 
 /* Wrapper to pdfi_dict_no_store_R_inner(), takes a char * as Key */
@@ -421,9 +496,16 @@ pdfi_dict_get_type2(pdf_context *ctx, pdf_dict *d, const char *Key1, const char 
 {
     int code;
 
-    code = pdfi_dict_get_type(ctx, d, Key1, type, o);
-    if (code == gs_error_undefined)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. Assume abbreviated names are shorter :-) */
+    if (strlen(Key1) < strlen(Key2)) {
+        code = pdfi_dict_get_type(ctx, d, Key1, type, o);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_type(ctx, d, Key2, type, o);
+    } else {
         code = pdfi_dict_get_type(ctx, d, Key2, type, o);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_type(ctx, d, Key1, type, o);
+    }
     return code;
 }
 
@@ -435,7 +517,7 @@ int pdfi_dict_get_type(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj_t
     if (code < 0)
         return code;
 
-    if ((*o)->type != type) {
+    if (pdfi_type_of(*o) != type) {
         pdfi_countdown(*o);
         *o = NULL;
         return_error(gs_error_typecheck);
@@ -450,24 +532,30 @@ pdfi_dict_get_int2(pdf_context *ctx, pdf_dict *d, const char *Key1,
 {
     int code;
 
-    code = pdfi_dict_get_int(ctx, d, Key1, i);
-    if (code == gs_error_undefined)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. Assume abbreviated names are shorter :-) */
+    if (strlen(Key1) < strlen(Key2)) {
+        code = pdfi_dict_get_int(ctx, d, Key1, i);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_int(ctx, d, Key2, i);
+    } else {
         code = pdfi_dict_get_int(ctx, d, Key2, i);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_int(ctx, d, Key1, i);
+    }
     return code;
 }
 
 int pdfi_dict_get_int(pdf_context *ctx, pdf_dict *d, const char *Key, int64_t *i)
 {
     int code;
-    pdf_num *n;
+    pdf_obj *n;
 
-    code = pdfi_dict_get_type(ctx, d, Key, PDF_INT, (pdf_obj **)&n);
+    code = pdfi_dict_get(ctx, d, Key, &n);
     if (code < 0)
         return code;
-
-    *i = n->value.i;
+    code = pdfi_obj_to_int(ctx, n, i);
     pdfi_countdown(n);
-    return 0;
+    return code;
 }
 
 /* Get an int from dict, and if undefined, return provided default */
@@ -492,56 +580,71 @@ pdfi_dict_get_bool2(pdf_context *ctx, pdf_dict *d, const char *Key1,
 {
     int code;
 
-    code = pdfi_dict_get_bool(ctx, d, Key1, val);
-    if (code == gs_error_undefined)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. Assume abbreviated names are shorter :-) */
+    if (strlen(Key1) < strlen(Key2)) {
+        code = pdfi_dict_get_bool(ctx, d, Key1, val);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_bool(ctx, d, Key2, val);
+    } else {
         code = pdfi_dict_get_bool(ctx, d, Key2, val);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_bool(ctx, d, Key1, val);
+    }
     return code;
 }
 
 int pdfi_dict_get_bool(pdf_context *ctx, pdf_dict *d, const char *Key, bool *val)
 {
     int code;
-    pdf_bool *b;
+    pdf_obj *b;
 
-    code = pdfi_dict_get_type(ctx, d, Key, PDF_BOOL, (pdf_obj **)&b);
+    code = pdfi_dict_get(ctx, d, Key, &b);
     if (code < 0)
         return code;
 
-    *val = b->value;
+    if (b == PDF_TRUE_OBJ) {
+        *val = 1;
+        return 0;
+    } else if (b == PDF_FALSE_OBJ) {
+        *val = 0;
+        return 0;
+    }
+
     pdfi_countdown(b);
-    return 0;
+
+    *val = 0; /* Be consistent at least! */
+    return_error(gs_error_typecheck);
 }
 
 int pdfi_dict_get_number2(pdf_context *ctx, pdf_dict *d, const char *Key1, const char *Key2, double *f)
 {
     int code;
 
-    code = pdfi_dict_get_number(ctx, d, Key1, f);
-    if (code == gs_error_undefined)
+    /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precendence. Assume abbreviated names are shorter :-) */
+    if (strlen(Key1) < strlen(Key2)) {
+        code = pdfi_dict_get_number(ctx, d, Key1, f);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_number(ctx, d, Key2, f);
+    } else {
         code = pdfi_dict_get_number(ctx, d, Key2, f);
+        if (code == gs_error_undefined)
+            code = pdfi_dict_get_number(ctx, d, Key1, f);
+    }
     return code;
 }
 
 int pdfi_dict_get_number(pdf_context *ctx, pdf_dict *d, const char *Key, double *f)
 {
     int code;
-    pdf_num *o;
+    pdf_obj *o;
 
-    code = pdfi_dict_get(ctx, d, Key, (pdf_obj **)&o);
+    code = pdfi_dict_get(ctx, d, Key, &o);
     if (code < 0)
         return code;
-    if (o->type == PDF_INT) {
-        *f = (double)(o->value.i);
-    } else {
-        if (o->type == PDF_REAL){
-            *f = o->value.d;
-        } else {
-            pdfi_countdown(o);
-            return_error(gs_error_typecheck);
-        }
-    }
+    code = pdfi_obj_to_real(ctx, o, f);
     pdfi_countdown(o);
-    return 0;
+
+    return code;
 }
 
 /* convenience functions for retrieving arrys, see shadings and functions */
@@ -562,7 +665,7 @@ int fill_domain_from_dict(pdf_context *ctx, float *parray, int size, pdf_dict *d
     code = pdfi_dict_get(ctx, dict, "Domain", (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
@@ -594,7 +697,7 @@ int fill_float_array_from_dict(pdf_context *ctx, float *parray, int size, pdf_di
     code = pdfi_dict_get(ctx, dict, Key, (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         code = gs_note_error(gs_error_typecheck);
         goto exit;
     }
@@ -620,13 +723,13 @@ int fill_bool_array_from_dict(pdf_context *ctx, bool *parray, int size, pdf_dict
 {
     int code, i;
     pdf_array *a = NULL;
-    pdf_bool *o;
+    pdf_obj *o;
     uint64_t array_size;
 
     code = pdfi_dict_get(ctx, dict, Key, (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
@@ -635,13 +738,20 @@ int fill_bool_array_from_dict(pdf_context *ctx, bool *parray, int size, pdf_dict
         return_error(gs_error_rangecheck);
 
     for (i=0;i< array_size;i++) {
-        code = pdfi_array_get_type(ctx, a, (uint64_t)i, PDF_BOOL, (pdf_obj **)&o);
+        code = pdfi_array_get(ctx, a, (uint64_t)i, (pdf_obj **)&o);
         if (code < 0) {
             pdfi_countdown(a);
             return_error(code);
         }
-        parray[i] = o->value;
-        pdfi_countdown(o);
+        if (o == PDF_TRUE_OBJ) {
+            parray[i] = 1;
+        } else if (o == PDF_FALSE_OBJ) {
+            parray[i] = 0;
+        } else {
+            pdfi_countdown(o);
+            pdfi_countdown(a);
+            return_error(gs_error_typecheck);
+        }
     }
     pdfi_countdown(a);
     return array_size;
@@ -657,7 +767,7 @@ int fill_matrix_from_dict(pdf_context *ctx, float *parray, pdf_dict *dict)
     code = pdfi_dict_get(ctx, dict, "Matrix", (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
@@ -693,7 +803,7 @@ int pdfi_make_float_array_from_dict(pdf_context *ctx, float **parray, pdf_dict *
     code = pdfi_dict_get(ctx, dict, Key, (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
@@ -730,7 +840,7 @@ int pdfi_make_int_array_from_dict(pdf_context *ctx, int **parray, pdf_dict *dict
     code = pdfi_dict_get(ctx, dict, Key, (pdf_obj **)&a);
     if (code < 0)
         return code;
-    if (a->type != PDF_ARRAY) {
+    if (pdfi_type_of(a) != PDF_ARRAY) {
         pdfi_countdown(a);
         return_error(gs_error_typecheck);
     }
@@ -754,43 +864,43 @@ int pdfi_make_int_array_from_dict(pdf_context *ctx, int **parray, pdf_dict *dict
     return array_size;
 }
 
-/* Put into dictionary with key as object */
-int pdfi_dict_put_obj(pdf_context *ctx, pdf_dict *d, pdf_obj *Key, pdf_obj *value)
+/* Put into dictionary with key as object -
+   If the key already exists, we'll only replace it
+   if "replace" is true.
+*/
+int pdfi_dict_put_obj(pdf_context *ctx, pdf_dict *d, pdf_obj *Key, pdf_obj *value, bool replace)
 {
-    uint64_t i;
-    pdf_obj **new_keys, **new_values;
-    pdf_name *n;
+    int i;
+    pdf_dict_entry *new_list;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
-    if (Key->type != PDF_NAME)
+    if (pdfi_type_of(Key) != PDF_NAME)
         return_error(gs_error_typecheck);
 
     /* First, do we have a Key/value pair already ? */
-    for (i=0;i< d->entries;i++) {
-        n = (pdf_name *)d->keys[i];
-        if (n && n->type == PDF_NAME) {
-            if (pdfi_name_cmp((pdf_name *)Key, n) == 0) {
-                if (d->values[i] == value)
-                    /* We already have this value stored with this key.... */
-                    return 0;
-                pdfi_countdown(d->values[i]);
-                d->values[i] = value;
-                pdfi_countup(value);
-                return 0;
-            }
-        }
+    i = pdfi_dict_find_key(ctx, d, (pdf_name *)Key, false);
+    if (i >= 0) {
+        if (d->list[i].value == value || replace == false)
+            /* We already have this value stored with this key.... */
+            return 0;
+        pdfi_countdown(d->list[i].value);
+        d->list[i].value = value;
+        pdfi_countup(value);
+        return 0;
     }
+
+    d->is_sorted = false;
 
     /* Nope, its a new Key */
     if (d->size > d->entries) {
         /* We have a hole, find and use it */
         for (i=0;i< d->size;i++) {
-            if (d->keys[i] == NULL) {
-                d->keys[i] = Key;
+            if (d->list[i].key == NULL) {
+                d->list[i].key = Key;
                 pdfi_countup(Key);
-                d->values[i] = value;
+                d->list[i].value = value;
                 pdfi_countup(value);
                 d->entries++;
                 return 0;
@@ -798,27 +908,82 @@ int pdfi_dict_put_obj(pdf_context *ctx, pdf_dict *d, pdf_obj *Key, pdf_obj *valu
         }
     }
 
-    new_keys = (pdf_obj **)gs_alloc_bytes(ctx->memory, (d->size + 1) * sizeof(pdf_obj *), "pdfi_dict_put reallocate dictionary keys");
-    new_values = (pdf_obj **)gs_alloc_bytes(ctx->memory, (d->size + 1) * sizeof(pdf_obj *), "pdfi_dict_put reallocate dictionary values");
-    if (new_keys == NULL || new_values == NULL){
-        gs_free_object(ctx->memory, new_keys, "pdfi_dict_put memory allocation failure");
-        gs_free_object(ctx->memory, new_values, "pdfi_dict_put memory allocation failure");
+    new_list = (pdf_dict_entry *)gs_alloc_bytes(ctx->memory, (d->size + 1) * sizeof(pdf_dict_entry), "pdfi_dict_put reallocate dictionary key/values");
+    if (new_list == NULL) {
         return_error(gs_error_VMerror);
     }
-    memcpy(new_keys, d->keys, d->size * sizeof(pdf_obj *));
-    memcpy(new_values, d->values, d->size * sizeof(pdf_obj *));
+    memcpy(new_list, d->list, d->size * sizeof(pdf_dict_entry));
 
-    gs_free_object(ctx->memory, d->keys, "pdfi_dict_put key reallocation");
-    gs_free_object(ctx->memory, d->values, "pdfi_dict_put value reallocation");
+    gs_free_object(ctx->memory, d->list, "pdfi_dict_put key/value reallocation");
 
-    d->keys = new_keys;
-    d->values = new_values;
+    d->list = new_list;
 
-    d->keys[d->size] = Key;
-    d->values[d->size] = value;
+    d->list[d->size].key = Key;
+    d->list[d->size].value = value;
     d->size++;
     d->entries++;
     pdfi_countup(Key);
+    pdfi_countup(value);
+
+    return 0;
+}
+
+/*
+ * Be very cautious using this routine; it does not check to see if a key already exists
+ * in a dictionary!. This is initially at least intended for use by the font code, to build
+ * a CharStrings dictionary. We do that by adding each glyph individually with a name
+ * created from a loop counter, so we know there cannot be any duplicates, and the time
+ * taken to check that each of 64K names was unique was quite significant.
+ * See bug #705534, the old PDF interpreter (nullpage, 72 dpi) runs this file in ~20 seconds
+ * pdfi runs it in around 40 seconds. With this change it runs in around 3 seconds. THis is,
+ * of course, an extreme example.
+ */
+int pdfi_dict_put_unchecked(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj *value)
+{
+    int i, code = 0;
+    pdf_dict_entry *new_list;
+    pdf_obj *key = NULL;
+
+    code = pdfi_name_alloc(ctx, (byte *)Key, strlen(Key), &key);
+    if (code < 0)
+        return code;
+    pdfi_countup(key);
+
+    if (d->size > d->entries) {
+        int search_start = d->entries < 1 ? 0 : d->entries - 1;
+        do {
+            /* We have a hole, find and use it */
+            for (i = search_start; i < d->size; i++) {
+                if (d->list[i].key == NULL) {
+                    d->list[i].key = key;
+                    d->list[i].value = value;
+                    pdfi_countup(value);
+                    d->entries++;
+                    return 0;
+                }
+            }
+            if (search_start == 0) {
+                /* This shouldn't ever happen, but just in case.... */
+                break;
+            }
+            search_start = 0;
+        } while(1);
+    }
+
+    new_list = (pdf_dict_entry *)gs_alloc_bytes(ctx->memory, (d->size + 1) * sizeof(pdf_dict_entry), "pdfi_dict_put reallocate dictionary key/values");
+    if (new_list == NULL) {
+        return_error(gs_error_VMerror);
+    }
+    memcpy(new_list, d->list, d->size * sizeof(pdf_dict_entry));
+
+    gs_free_object(ctx->memory, d->list, "pdfi_dict_put key/value reallocation");
+
+    d->list = new_list;
+
+    d->list[d->size].key = key;
+    d->list[d->size].value = value;
+    d->size++;
+    d->entries++;
     pdfi_countup(value);
 
     return 0;
@@ -835,7 +1000,7 @@ int pdfi_dict_put(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_obj *value
         return code;
     pdfi_countup(key);
 
-    code = pdfi_dict_put_obj(ctx, d, key, value);
+    code = pdfi_dict_put_obj(ctx, d, key, value, true);
     pdfi_countdown(key); /* get rid of extra ref */
     return code;
 }
@@ -855,15 +1020,9 @@ int pdfi_dict_put_int(pdf_context *ctx, pdf_dict *d, const char *key, int64_t va
 
 int pdfi_dict_put_bool(pdf_context *ctx, pdf_dict *d, const char *key, bool value)
 {
-    int code;
-    pdf_bool *obj = NULL;
+    pdf_obj *obj = (value ? PDF_TRUE_OBJ : PDF_FALSE_OBJ);
 
-    code = pdfi_object_alloc(ctx, PDF_BOOL, 0, (pdf_obj **)&obj);
-    if (code < 0)
-        return code;
-
-    obj->value = value;
-    return pdfi_dict_put(ctx, d, key, (pdf_obj *)obj);
+    return pdfi_dict_put(ctx, d, key, obj);
 }
 
 int pdfi_dict_put_name(pdf_context *ctx, pdf_dict *d, const char *key, const char *name)
@@ -886,9 +1045,10 @@ int pdfi_dict_copy(pdf_context *ctx, pdf_dict *target, pdf_dict *source)
     int i=0, code = 0;
 
     for (i=0;i< source->entries;i++) {
-        code = pdfi_dict_put_obj(ctx, target, source->keys[i], source->values[i]);
+        code = pdfi_dict_put_obj(ctx, target, source->list[i].key, source->list[i].value, true);
         if (code < 0)
             return code;
+        target->is_sorted = source->is_sorted;
     }
     return 0;
 }
@@ -896,26 +1056,34 @@ int pdfi_dict_copy(pdf_context *ctx, pdf_dict *target, pdf_dict *source)
 int pdfi_dict_known(pdf_context *ctx, pdf_dict *d, const char *Key, bool *known)
 {
     int i;
-    pdf_name *t;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
     *known = false;
-    for (i=0;i< d->entries;i++) {
-        t = (pdf_name *)d->keys[i];
+    i = pdfi_dict_find(ctx, d, Key, true);
+    if (i >= 0)
+        *known = true;
 
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_is(t, Key)) {
-                *known = true;
-                break;
-            }
-        }
-    }
     return 0;
 }
 
-/* Tests if a Key is present in the dictionary, if it is, retrieves the value associted with the
+int pdfi_dict_known_by_key(pdf_context *ctx, pdf_dict *d, pdf_name *Key, bool *known)
+{
+    int i;
+
+    if (pdfi_type_of(d) != PDF_DICT)
+        return_error(gs_error_typecheck);
+
+    *known = false;
+    i = pdfi_dict_find_key(ctx, d, Key, true);
+    if (i >= 0)
+        *known = true;
+
+    return 0;
+}
+
+/* Tests if a Key is present in the dictionary, if it is, retrieves the value associated with the
  * key. Returns < 0 for error, 0 if the key is not found > 0 if the key is present, and initialises
  * the value in the arguments. Since this uses pdf_dict_get(), the returned value has its
  * reference count incremented by 1, just like pdfi_dict_get().
@@ -962,6 +1130,25 @@ int pdfi_dict_knownget_type(pdf_context *ctx, pdf_dict *d, const char *Key, pdf_
     return 1;
 }
 
+int pdfi_dict_knownget_bool(pdf_context *ctx, pdf_dict *d, const char *Key, bool *b)
+{
+    bool known = false;
+    int code;
+
+    code = pdfi_dict_known(ctx, d, Key, &known);
+    if (code < 0)
+        return code;
+
+    if (known == false)
+        return 0;
+
+    code = pdfi_dict_get_bool(ctx, d, Key, b);
+    if (code < 0)
+        return code;
+
+    return 1;
+}
+
 /* Like pdfi_dict_knownget_type() but retrieves numbers (two possible types)
  */
 int pdfi_dict_knownget_number(pdf_context *ctx, pdf_dict *d, const char *Key, double *f)
@@ -983,33 +1170,11 @@ int pdfi_dict_knownget_number(pdf_context *ctx, pdf_dict *d, const char *Key, do
     return 1;
 }
 
-int pdfi_dict_known_by_key(pdf_context *ctx, pdf_dict *d, pdf_name *Key, bool *known)
-{
-    int i;
-    pdf_obj *t;
-
-    if (d->type != PDF_DICT)
-        return_error(gs_error_typecheck);
-
-    *known = false;
-    for (i=0;i< d->entries;i++) {
-        t = d->keys[i];
-
-        if (t && t->type == PDF_NAME) {
-            if (pdfi_name_cmp((pdf_name *)t, Key) == 0) {
-                *known = true;
-                break;
-            }
-        }
-    }
-    return 0;
-}
-
 int pdfi_dict_next(pdf_context *ctx, pdf_dict *d, pdf_obj **Key, pdf_obj **Value, uint64_t *index)
 {
     int code;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
     while (1) {
@@ -1026,14 +1191,14 @@ int pdfi_dict_next(pdf_context *ctx, pdf_dict *d, pdf_obj **Key, pdf_obj **Value
          * dictionary somehow ends up with NULL keys in the allocated
          * section.
          */
-        *Key = d->keys[*index];
+        *Key = d->list[*index].key;
         if (*Key == NULL) {
             (*index)++;
             continue;
         }
 
-        if (d->values[*index]->type == PDF_INDIRECT) {
-            pdf_indirect_ref *r = (pdf_indirect_ref *)d->values[*index];
+        if (pdfi_type_of(d->list[*index].value) == PDF_INDIRECT) {
+            pdf_indirect_ref *r = (pdf_indirect_ref *)d->list[*index].value;
             pdf_obj *o;
 
             code = pdfi_dereference(ctx, r->ref_object_num, r->ref_generation_num, &o);
@@ -1044,7 +1209,7 @@ int pdfi_dict_next(pdf_context *ctx, pdf_dict *d, pdf_obj **Key, pdf_obj **Value
             *Value = o;
             break;
         } else {
-            *Value = d->values[*index];
+            *Value = d->list[*index].value;
             pdfi_countup(*Value);
             break;
         }
@@ -1067,7 +1232,7 @@ int pdfi_dict_key_next(pdf_context *ctx, pdf_dict *d, pdf_obj **Key, uint64_t *i
 {
     uint64_t *i = index;
 
-    if (d->type != PDF_DICT)
+    if (pdfi_type_of(d) != PDF_DICT)
         return_error(gs_error_typecheck);
 
     while (1) {
@@ -1076,7 +1241,7 @@ int pdfi_dict_key_next(pdf_context *ctx, pdf_dict *d, pdf_obj **Key, uint64_t *i
             return gs_error_undefined;
         }
 
-        *Key = d->keys[*i];
+        *Key = d->list[*i].key;
         if (*Key == NULL) {
             (*i)++;
             continue;
@@ -1102,15 +1267,16 @@ int pdfi_merge_dicts(pdf_context *ctx, pdf_dict *target, pdf_dict *source)
     bool known = false;
 
     for (i=0;i< source->entries;i++) {
-        code = pdfi_dict_known_by_key(ctx, target, (pdf_name *)source->keys[i], &known);
+        code = pdfi_dict_known_by_key(ctx, target, (pdf_name *)source->list[i].key, &known);
         if (code < 0)
             return code;
         if (!known) {
-            code = pdfi_dict_put_obj(ctx, target, source->keys[i], source->values[i]);
+            code = pdfi_dict_put_obj(ctx, target, source->list[i].key, source->list[i].value, true);
             if (code < 0)
                 return code;
         }
     }
+    target->is_sorted = false;
     return 0;
 }
 
@@ -1122,7 +1288,7 @@ int64_t pdfi_stream_length(pdf_context *ctx, pdf_stream *stream)
     int64_t Length = 0;
     int code;
 
-    if (stream->type != PDF_STREAM)
+    if (pdfi_type_of(stream) != PDF_STREAM)
         return 0;
 
     if (stream->length_valid)
@@ -1148,14 +1314,14 @@ int64_t pdfi_stream_length(pdf_context *ctx, pdf_stream *stream)
  */
 gs_offset_t pdfi_stream_offset(pdf_context *ctx, pdf_stream *stream)
 {
-    if (stream->type != PDF_STREAM)
+    if (pdfi_type_of(stream) != PDF_STREAM)
         return 0;
     return stream->stream_offset;
 }
 
 pdf_stream *pdfi_stream_parent(pdf_context *ctx, pdf_stream *stream)
 {
-    if (stream->type != PDF_STREAM)
+    if (pdfi_type_of(stream) != PDF_STREAM)
         return 0;
     return (pdf_stream *)stream->parent_obj;
 }
@@ -1186,11 +1352,15 @@ void pdfi_clear_stream_parent(pdf_context *ctx, pdf_stream *stream)
 int pdfi_dict_from_obj(pdf_context *ctx, pdf_obj *obj, pdf_dict **dict)
 {
     *dict = NULL;
-    if (obj->type == PDF_DICT)
-        *dict = (pdf_dict *)obj;
-    else if (obj->type == PDF_STREAM)
-        *dict = ((pdf_stream *)obj)->stream_dict;
-    else
-        return_error(gs_error_typecheck);
+    switch (pdfi_type_of(obj)) {
+        case PDF_DICT:
+            *dict = (pdf_dict *)obj;
+            break;
+        case PDF_STREAM:
+            *dict = ((pdf_stream *)obj)->stream_dict;
+            break;
+        default:
+            return_error(gs_error_typecheck);
+    }
     return 0;
 }

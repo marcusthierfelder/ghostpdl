@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -203,7 +203,7 @@ put_bytes(stream * s, const byte *ptr, uint count)
 static int
 check_ioerror(stream * s)
 {
-    uint used;
+    uint used = 0;
 
     return sputs(s, (byte *)&used, 0, &used);
 }
@@ -274,7 +274,7 @@ cff_put_real(cff_writer_t *pcw, double f)
         byte b = 0xff;
         const char *p;
 
-        gs_sprintf(str, "%g", f);
+        gs_snprintf(str, sizeof(str), "%g", f);
         sputc(pcw->strm, CD_REAL);
         for (p = str; ; ++p) {
             int digit;

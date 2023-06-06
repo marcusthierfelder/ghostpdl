@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -454,6 +454,19 @@ gx_remap_ICC(const gs_client_color * pcc, const gs_color_space * pcs,
     cmm_dev_profile_t *dev_profile;
     int code;
 
+    color_replace_t param;
+    param.pcc = pcc;
+    param.pcs = pcs;
+    param.pdc = pdc;
+    param.pgs = pgs;
+    param.pdf14_iccprofile = NULL;
+
+    /* Try color replacement. If successful (>0) then no
+       ICC color management for this color. */
+    if (dev_proc(pgs->device, dev_spec_op)(pgs->device,
+        gxdso_replacecolor, &param, sizeof(color_replace_t)) > 0)
+        return 0;
+
     code = dev_proc(dev, get_profile)(dev, &dev_profile);
     if (code < 0)
         return code;
@@ -474,6 +487,7 @@ gx_remap_ICC(const gs_client_color * pcc, const gs_color_space * pcs,
 #endif
         return_error(gs_error_unknownerror);
     }
+
     code = gx_remap_ICC_with_link(pcc, pcs, pdc, pgs, dev, select, icc_link);
     /* Release the link */
     gsicc_release_link(icc_link);

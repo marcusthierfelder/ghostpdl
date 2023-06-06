@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* array handling for the PDF interpreter */
@@ -20,6 +20,7 @@
 #include "pdf_stack.h"
 #include "pdf_deref.h"
 #include "pdf_array.h"
+#include "pdf_loop_detect.h"
 
 /* NOTE: I think this should take a pdf_context param, but it's not available where it's
  * called, would require some surgery.
@@ -40,7 +41,6 @@ void pdfi_free_array(pdf_obj *o)
 int pdfi_array_alloc(pdf_context *ctx, uint64_t size, pdf_array **a)
 {
     int code, i;
-    pdf_obj *n = NULL;
 
     *a = NULL;
     code = pdfi_object_alloc(ctx, PDF_ARRAY, size, (pdf_obj **)a);
@@ -50,22 +50,14 @@ int pdfi_array_alloc(pdf_context *ctx, uint64_t size, pdf_array **a)
     (*a)->size = size;
 
     if (size > 0) {
-        /* Make a null object */
-        code = pdfi_object_alloc(ctx, PDF_NULL, 1, &n);
-        if (code < 0) {
-            pdfi_countdown(*a);
-            *a = NULL;
-            return code;
-        }
-        /* And start all the array entries pointing at that null object.
+        /* Start all the array entries pointing to null.
          * array_put will replace tehm. This ensures we always have a valid
          * object for every entry. pdfi_array_from_stack() doesn't do this
          * initialisation because we know how many obejcts there are in the array
          * and we have valid objects for each entry on the stack already created.
          */
         for (i=0;i<size;i++){
-            (*a)->values[i] = n;
-            pdfi_countup(n);
+            (*a)->values[i] = PDF_NULL_OBJ;
         }
     }
     return 0;
@@ -118,31 +110,76 @@ int pdfi_array_from_stack(pdf_context *ctx, uint32_t indirect_num, uint32_t indi
     return code;
 }
 
-/* Fetch object from array, resolving indirect reference if needed
- * setref -- indicates whether to replace indirect ref with the object
- */
-static int pdfi_array_fetch(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj **o, bool setref)
+int pdfi_array_fetch_recursing(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj **o, bool setref, bool cache)
 {
     int code;
     pdf_obj *obj;
 
     *o = NULL;
 
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     if (index >= a->size)
         return_error(gs_error_rangecheck);
     obj = a->values[index];
 
-    if (obj->type == PDF_INDIRECT) {
+    if (pdfi_type_of(obj) == PDF_INDIRECT) {
         pdf_obj *o1 = NULL;
         pdf_indirect_ref *r = (pdf_indirect_ref *)obj;
 
         if (r->ref_object_num == a->object_num)
             return_error(gs_error_circular_reference);
 
-        code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, &o1);
+        if (cache)
+            code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, &o1);
+        else
+            code = pdfi_deref_loop_detect_nocache(ctx, r->ref_object_num, r->ref_generation_num, &o1);
+        if (code < 0)
+            return code;
+
+        if (setref)
+            (void)pdfi_array_put(ctx, a, index, o1);
+        obj = o1;
+    } else {
+        if (ctx->loop_detection != NULL && (uintptr_t)obj > TOKEN__LAST_KEY && obj->object_num != 0)
+            if (pdfi_loop_detector_check_object(ctx, obj->object_num))
+                return gs_note_error(gs_error_circular_reference);
+        pdfi_countup(obj);
+    }
+
+    *o = obj;
+    return 0;
+}
+
+/* Fetch object from array, resolving indirect reference if needed
+ * setref -- indicates whether to replace indirect ref with the object
+ */
+int pdfi_array_fetch(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj **o, bool setref, bool cache)
+{
+    int code;
+    pdf_obj *obj;
+
+    *o = NULL;
+
+    if (pdfi_type_of(a) != PDF_ARRAY)
+        return_error(gs_error_typecheck);
+
+    if (index >= a->size)
+        return_error(gs_error_rangecheck);
+    obj = a->values[index];
+
+    if (pdfi_type_of(obj) == PDF_INDIRECT) {
+        pdf_obj *o1 = NULL;
+        pdf_indirect_ref *r = (pdf_indirect_ref *)obj;
+
+        if (r->ref_object_num == a->object_num)
+            return_error(gs_error_circular_reference);
+
+        if (cache)
+            code = pdfi_deref_loop_detect(ctx, r->ref_object_num, r->ref_generation_num, &o1);
+        else
+            code = pdfi_deref_loop_detect_nocache(ctx, r->ref_object_num, r->ref_generation_num, &o1);
         if (code < 0)
             return code;
 
@@ -157,26 +194,13 @@ static int pdfi_array_fetch(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_
     return 0;
 }
 
-/* The object returned by pdfi_array_get has its reference count incremented by 1 to
- * indicate the reference now held by the caller, in **o.
- */
-int pdfi_array_get(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj **o)
-{
-    int code;
-
-    code = pdfi_array_fetch(ctx, a, index, o, true);
-    if (code < 0) return code;
-
-    return 0;
-}
-
 /* Get element from array without resolving PDF_INDIRECT dereferences.
  * It looks to me like some usages need to do the checking themselves to
  * avoid circular references?  Can remove this if not really needed.
  */
 int pdfi_array_get_no_deref(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj **o)
 {
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     if (index >= a->size)
@@ -193,7 +217,7 @@ int pdfi_array_get_no_store_R(pdf_context *ctx, pdf_array *a, uint64_t index, pd
 {
     int code;
 
-    code = pdfi_array_fetch(ctx, a, index, o, false);
+    code = pdfi_array_fetch(ctx, a, index, o, false, false);
     if (code < 0) return code;
 
     return 0;
@@ -211,7 +235,7 @@ int pdfi_array_get_type(pdf_context *ctx, pdf_array *a, uint64_t index,
     if (code < 0)
         return code;
 
-    if ((*o)->type != type) {
+    if (pdfi_type_of(*o) != type) {
         pdfi_countdown(*o);
         *o = NULL;
         return_error(gs_error_typecheck);
@@ -222,34 +246,26 @@ int pdfi_array_get_type(pdf_context *ctx, pdf_array *a, uint64_t index,
 int pdfi_array_get_int(pdf_context *ctx, pdf_array *a, uint64_t index, int64_t *i)
 {
     int code;
-    pdf_num *n;
+    pdf_obj *n;
 
-    code = pdfi_array_get_type(ctx, a, index, PDF_INT, (pdf_obj **)&n);
+    code = pdfi_array_get(ctx, a, index, &n);
     if (code < 0)
         return code;
-    *i = n->value.i;
+    code = pdfi_obj_to_int(ctx, n, i);
     pdfi_countdown(n);
-    return 0;
+    return code;
 }
 
-int pdfi_array_get_number(pdf_context *ctx, pdf_array *a, uint64_t index, double *f)
+int pdfi_array_get_number(pdf_context *ctx, pdf_array *a, uint64_t index, double *d)
 {
     int code;
-    pdf_num *n;
+    pdf_obj *n;
 
-    code = pdfi_array_get(ctx, a, index, (pdf_obj **)&n);
+    code = pdfi_array_get(ctx, a, index, &n);
     if (code < 0)
         return code;
 
-    if (n->type == PDF_INT)
-        *f = (double)n->value.i;
-    else {
-        if (n->type == PDF_REAL)
-            *f = n->value.d;
-        else {
-            code = gs_note_error(gs_error_typecheck);
-        }
-    }
+    code = pdfi_obj_to_real(ctx, n, d);
     pdfi_countdown(n);
 
     return code;
@@ -263,17 +279,17 @@ bool pdfi_array_known(pdf_context *ctx, pdf_array *a, pdf_obj *o, int *index)
 {
     int i;
 
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     for (i=0; i < a->size; i++) {
         pdf_obj *val;
         int code;
 
-        code = pdfi_array_fetch(ctx, a, i, &val, true);
+        code = pdfi_array_fetch(ctx, a, i, &val, true, true);
         if (code < 0)
             continue;
-        if (val->object_num == o->object_num) {
+        if (pdf_object_num(val) == pdf_object_num(o)) {
             if (index != NULL) *index = i;
             pdfi_countdown(val);
             return true;
@@ -285,7 +301,7 @@ bool pdfi_array_known(pdf_context *ctx, pdf_array *a, pdf_obj *o, int *index)
 
 int pdfi_array_put(pdf_context *ctx, pdf_array *a, uint64_t index, pdf_obj *o)
 {
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     if (index >= a->size)
@@ -302,7 +318,7 @@ int pdfi_array_put_int(pdf_context *ctx, pdf_array *a, uint64_t index, int64_t v
     int code;
     pdf_num *obj;
 
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     code = pdfi_object_alloc(ctx, PDF_INT, 0, (pdf_obj **)&obj);
@@ -318,7 +334,7 @@ int pdfi_array_put_real(pdf_context *ctx, pdf_array *a, uint64_t index, double v
     int code;
     pdf_num *obj;
 
-    if (a->type != PDF_ARRAY)
+    if (pdfi_type_of(a) != PDF_ARRAY)
         return_error(gs_error_typecheck);
 
     code = pdfi_object_alloc(ctx, PDF_REAL, 0, (pdf_obj **)&obj);
@@ -368,7 +384,7 @@ int pdfi_array_to_gs_rect(pdf_context *ctx, pdf_array *array, gs_rect *rect)
     rect->q.y = 1.0;
 
     /* Identity matrix if no array */
-    if (array == NULL || array->type != PDF_ARRAY) {
+    if (array == NULL || pdfi_type_of(array) != PDF_ARRAY) {
         return 0;
     }
     if (pdfi_array_size(array) != 4) {
@@ -461,7 +477,7 @@ int pdfi_array_to_gs_matrix(pdf_context *ctx, pdf_array *array, gs_matrix *mat)
     mat->ty = 0.0;
 
     /* Identity matrix if no array */
-    if (array == NULL || array->type != PDF_ARRAY) {
+    if (array == NULL || pdfi_type_of(array) != PDF_ARRAY) {
         return 0;
     }
     if (pdfi_array_size(array) != 6) {

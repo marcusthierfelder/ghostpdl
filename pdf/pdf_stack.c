@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Stack operations for the PDF interpreter */
@@ -49,7 +49,7 @@ int pdfi_push(pdf_context *ctx, pdf_obj *o)
 
     if (ctx->stack_top >= ctx->stack_limit) {
         if (ctx->stack_size >= MAX_STACK_SIZE)
-            return_error(gs_error_stackoverflow);
+            return_error(gs_error_pdf_stackoverflow);
 
         new_stack = (pdf_obj **)gs_alloc_bytes(ctx->memory, (ctx->stack_size + INITIAL_STACK_SIZE) * sizeof (pdf_obj *), "pdfi_push_increase_interp_stack");
         if (new_stack == NULL)
@@ -106,7 +106,7 @@ int pdfi_count_to_mark(pdf_context *ctx, uint64_t *count)
 
     *count = 0;
     while (&ctx->stack_top[index] >= save_bot) {
-        if (o->type == PDF_ARRAY_MARK || o->type == PDF_DICT_MARK)
+        if (pdfi_type_of(o) == PDF_ARRAY_MARK || pdfi_type_of(o) == PDF_DICT_MARK || pdfi_type_of(o) == PDF_PROC_MARK )
             return 0;
         o = ctx->stack_top[--index];
         (*count)++;
@@ -123,4 +123,106 @@ int pdfi_clear_to_mark(pdf_context *ctx)
     if (code < 0)
         return code;
     return pdfi_pop(ctx, count + 1);
+}
+
+int
+pdfi_destack_real(pdf_context *ctx, double *d)
+{
+    int code;
+
+    if (pdfi_count_stack(ctx) < 1)
+        return_error(gs_error_stackunderflow);
+
+    code = pdfi_obj_to_real(ctx, ctx->stack_top[-1], d);
+    if (code < 0) {
+        pdfi_clearstack(ctx);
+        return code;
+    }
+    pdfi_pop(ctx, 1);
+
+    return 0;
+}
+
+int
+pdfi_destack_reals(pdf_context *ctx, double *d, int n)
+{
+    int i, code;
+
+    if (pdfi_count_stack(ctx) < n) {
+        pdfi_clearstack(ctx);
+        return_error(gs_error_stackunderflow);
+    }
+
+    for (i = 0; i < n; i++) {
+        code = pdfi_obj_to_real(ctx, ctx->stack_top[i-n], &d[i]);
+        if (code < 0) {
+            pdfi_clearstack(ctx);
+            return code;
+        }
+    }
+    pdfi_pop(ctx, n);
+
+    return 0;
+}
+
+int
+pdfi_destack_floats(pdf_context *ctx, float *d, int n)
+{
+    int i, code;
+
+    if (pdfi_count_stack(ctx) < n) {
+        pdfi_clearstack(ctx);
+        return_error(gs_error_stackunderflow);
+    }
+
+    for (i = 0; i < n; i++) {
+        code = pdfi_obj_to_float(ctx, ctx->stack_top[i-n], &d[i]);
+        if (code < 0) {
+            pdfi_clearstack(ctx);
+            return code;
+        }
+    }
+    pdfi_pop(ctx, n);
+
+    return 0;
+}
+
+int
+pdfi_destack_int(pdf_context *ctx, int64_t *i)
+{
+    int code;
+
+    if (pdfi_count_stack(ctx) < 1)
+        return_error(gs_error_stackunderflow);
+
+    code = pdfi_obj_to_int(ctx, ctx->stack_top[-1], i);
+    if (code < 0) {
+        pdfi_clearstack(ctx);
+        return code;
+    }
+    pdfi_pop(ctx, 1);
+
+    return 0;
+}
+
+int
+pdfi_destack_ints(pdf_context *ctx, int64_t *i64, int n)
+{
+    int i, code;
+
+    if (pdfi_count_stack(ctx) < n) {
+        pdfi_clearstack(ctx);
+        return_error(gs_error_stackunderflow);
+    }
+
+    for (i = 0; i < n; i++) {
+        code = pdfi_obj_to_int(ctx, ctx->stack_top[i-n], &i64[i]);
+        if (code < 0) {
+            pdfi_clearstack(ctx);
+            return code;
+        }
+    }
+    pdfi_pop(ctx, n);
+
+    return 0;
 }

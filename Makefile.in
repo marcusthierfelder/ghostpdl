@@ -1,4 +1,4 @@
-# Copyright (C) 2001-2021 Artifex Software, Inc.
+# Copyright (C) 2001-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 # makefile template for/from the autoconf build.
 # @configure_input@
@@ -66,6 +66,10 @@ GPDLOBJDIR=./$(BUILDDIRPREFIX)@OBJDIR_BSDMAKE_WORKAROUND@
 URFSRCDIR=@srcdir@/urf
 URFGENDIR=./$(BUILDDIRPREFIX)@OBJDIR_BSDMAKE_WORKAROUND@
 URFOBJDIR=./$(BUILDDIRPREFIX)@OBJDIR_BSDMAKE_WORKAROUND@
+
+SOSRCDIR=@srcdir@/so
+SOGENDIR=./$(BUILDDIRPREFIX)@OBJDIR_BSDMAKE_WORKAROUND@
+SOOBJDIR=./$(BUILDDIRPREFIX)@OBJDIR_BSDMAKE_WORKAROUND@
 
 CONTRIBDIR=@srcdir@/contrib
 
@@ -249,10 +253,9 @@ EXTRACT_DIR=@EXTRACT_DIR@
 FT_BRIDGE=@FT_BRIDGE@
 SHARE_FT=@SHARE_FT@
 FTSRCDIR=@FTSRCDIR@
-FT_CFLAGS=@FT_CFLAGS@ -DSHARE_FT=@SHARE_FT@
+FT_CFLAGS=@FT_CFLAGS@ @FT_HIDDEN_CFLAGS@ -DSHARE_FT=@SHARE_FT@
 FT_LIBS=@FT_LIBS@
 FT_LIB_PATH=@FT_LIB_PATH@
-FT_CONFIG_SYSTEM_ZLIB=@FT_SYS_ZLIB@
 
 # Define whether to compile in UFST.
 # FAPI/UFST depends on UFST_BRIDGE being undefined - hence the construct below.
@@ -349,8 +352,13 @@ URF_INCLUDE=@URF_INCLUDE@
 URF_DEV=@URF_DEV@
 SURFX_H=@SURFX_H@
 
+# Do we have SmartOffice support?
+ENABLE_SO=@ENABLESO@
+GPDL_SO_TOP_OBJ=@GPDL_SO_TOP_OBJ@
+SO_PDFEXPORT_LIB=@SO_PDFEXPORT_LIB@
+
 EXPATSRCDIR=@EXPATDIR@
-EXPAT_CFLAGS=@EXPAT_CFLAGS@
+EXPAT_CFLAGS=@EXPAT_CFLAGS@ @XML_HIDDEN_CFLAGS@
 EXPATGENDIR=$(GLGENDIR)
 EXPATOBJDIR=$(GLOBJDIR)
 EXPATINCDIR = $(EXPATSRCDIR)$(D)lib
@@ -381,6 +389,7 @@ CUPSPDFTORASTER=@CUPSPDFTORASTER@
 SHARE_LCUPS=@SHARELCUPS@
 LCUPS_NAME=cups
 LCUPSSRCDIR=@CUPS_DIR@
+LIBCUPSSRCDIR=@LIB_CUPS_DIR@
 LCUPSBUILDTYPE=@LCUPSBUILDTYPE@
 CUPS_CC=$(CC)
 
@@ -651,7 +660,7 @@ DISPLAY_DEV=$(DD)bbox.dev
 #DEVICE_DEVS18=
 #DEVICE_DEVS19=
 #DEVICE_DEVS20=$(DD)cljet5.dev $(DD)cljet5c.dev
-#DEVICE_DEVS21=$(DD)spotcmyk.dev $(DD)devicen.dev $(DD)xcf.dev $(DD)psdcmyk.dev $(DD)psdrgb.dev $(DD)psdcmykog.dev $(DD)fpng.dev
+#DEVICE_DEVS21=$(DD)spotcmyk.dev $(DD)devicen.dev $(DD)xcf.dev $(DD)psdcmyk.dev $(DD)psdrgb.dev $(DD)psdrgbtags.dev $(DD)psdcmykog.dev $(DD)fpng.dev
 DEVICE_DEVS=$(DISPLAY_DEV) @X11_DEVS@
 DEVICE_DEVS1=@F_DEVS@
 DEVICE_DEVS2=@P_DEVS@

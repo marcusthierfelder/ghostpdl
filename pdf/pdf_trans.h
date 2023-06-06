@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #ifndef PDF_TRANSPARENCY_OPERATORS
@@ -34,6 +34,7 @@ typedef enum {
 } pdfi_transparency_caller_t;
 
 bool pdfi_trans_okOPcs(pdf_context* ctx);
+int pdfi_trans_required(pdf_context *ctx);
 int pdfi_trans_setup_text(pdf_context *ctx, pdfi_trans_state_t *state, bool is_show);
 int pdfi_trans_teardown_text(pdf_context *ctx, pdfi_trans_state_t *state);
 int pdfi_trans_setup(pdf_context *ctx, pdfi_trans_state_t *state, gs_rect *bbox, pdfi_transparency_caller_t caller);

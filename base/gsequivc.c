@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -472,9 +472,10 @@ capture_spot_equivalent_cmyk_colors(gx_device * pdev, const gs_gstate * pgs,
                           0 /* blend_profile */, 0 /* postren_profile */,
                           { {0} } /* rendercond[] */, 0 /* devicegraytok */,
                           0 /* graydection */, 0 /* pageneutralcolor */,
-                          0 /* usefastcolor */, 0 /* blacktext */, 0 /* supports_devn */,
-                          0 /* overprint_control */, 0 /* spotnames */,
-                          0 /* prebandthreshold */, 0 /* memory */,
+                          0 /* usefastcolor */, 0 /* blacktext */, 0 /* blackvector */,
+                          0.0 /* blackthresholdL */, 0.0 /* blackthresholdC */,
+                          0 /* supports_devn */, 0 /* overprint_control */,
+                          0 /* spotnames */, 0 /* prebandthreshold */, 0 /* memory */,
                           { 0 } /* rc_header */
                           };
 
@@ -502,6 +503,7 @@ capture_spot_equivalent_cmyk_colors(gx_device * pdev, const gs_gstate * pgs,
 
     temp_profile.usefastcolor = false;  /* This avoids a few headaches */
     temp_profile.blacktext = false;
+    temp_profile.blackvector = false;
     temp_profile.prebandthreshold = true;
     temp_profile.supports_devn = false;
     temp_profile.rendercond[0] = render_cond;

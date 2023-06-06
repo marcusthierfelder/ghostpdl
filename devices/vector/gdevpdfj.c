@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -348,8 +348,10 @@ pdf_begin_write_image(gx_device_pdf * pdev, pdf_image_writer * piw,
     }
     pdev->strm = pdev->streams.strm;
     pdev->strm = cos_write_stream_alloc(data, pdev, "pdf_begin_write_image");
-    if (pdev->strm == 0)
+    if (pdev->strm == 0) {
+        pdev->strm = save_strm;
         return_error(gs_error_VMerror);
+    }
     if (!mask)
         piw->data = data;
     piw->height = h;
@@ -522,7 +524,7 @@ smask_image_check(gx_device_pdf * pdev, pdf_resource_t *pres0, pdf_resource_t *p
                 if (p > v->contents.chars.data + v->contents.chars.size)
                     return 0;
                 ix *= 10;
-                ix += (*p) - 0x30;
+                ix += (*p++) - 0x30;
             }
             if (ix != pdev->image_mask_id)
                 return 0;

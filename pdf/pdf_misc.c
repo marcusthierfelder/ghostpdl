@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Miscellaneous routines */
@@ -18,6 +18,7 @@
 #include "pdf_int.h"
 #include "pdf_stack.h"
 #include "pdf_misc.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "gspath.h"             /* For gs_strokepath() */
 #include "gspaint.h"            /* For gs_erasepage() */
@@ -141,14 +142,18 @@ int pdfi_setrenderingintent(pdf_context *ctx, pdf_name *n)
     } else if (pdfi_name_is(n, "AbsoluteColorimetric")) {
         code = gs_setrenderingintent(ctx->pgs, 3);
     } else {
-        code = gs_error_undefined;
+        /* PDF 1.7 Reference, bottom of page 260 if a PDF uses an unknown rendering intent
+         * then use RelativeColoimetric. But flag a warning.
+         */
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_RENDERINGINTENT, "pdfi_setrenderingintent", "");
+        code = gs_setrenderingintent(ctx->pgs, 1);
     }
     return code;
 }
 
 int pdfi_string_from_name(pdf_context *ctx, pdf_name *n, char **str, int *len)
 {
-    if (n->type != PDF_NAME)
+    if (pdfi_type_of(n) != PDF_NAME)
         return gs_note_error(gs_error_typecheck);
 
     *str = NULL;
@@ -162,6 +167,13 @@ int pdfi_string_from_name(pdf_context *ctx, pdf_name *n, char **str, int *len)
     (*str)[n->length] = 0x00;
     *len = n->length;
 
+    return 0;
+}
+
+int pdfi_free_string_from_name(pdf_context *ctx, char *str)
+{
+    if (str != NULL)
+        gs_free_object(ctx->memory, str, "pdfi_free_string_from_name");
     return 0;
 }
 

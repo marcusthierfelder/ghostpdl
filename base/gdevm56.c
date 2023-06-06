@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* 56-bit-per-pixel "memory" (stored bitmap) device */
@@ -472,7 +472,7 @@ mem56_word_fill_rectangle(gx_device * dev, int x, int y, int w, int h,
 {
     gx_device_memory * const mdev = (gx_device_memory *)dev;
     byte *base;
-    uint raster;
+    size_t raster;
 
     fit_fill(dev, x, y, w, h);
     base = scan_line_base(mdev, y);
@@ -491,7 +491,7 @@ mem56_word_copy_mono(gx_device * dev,
 {
     gx_device_memory * const mdev = (gx_device_memory *)dev;
     byte *row;
-    uint raster;
+    size_t raster;
     bool store;
 
     fit_copy(dev, base, sourcex, sraster, id, x, y, w, h);
@@ -513,7 +513,7 @@ mem56_word_copy_color(gx_device * dev,
 {
     gx_device_memory * const mdev = (gx_device_memory *)dev;
     byte *row;
-    uint raster;
+    size_t raster;
 
     fit_copy(dev, base, sourcex, sraster, id, x, y, w, h);
     row = scan_line_base(mdev, y);

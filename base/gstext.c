@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -324,34 +324,8 @@ gs_text_begin(gs_gstate * pgs, const gs_text_params_t * text,
     /* Processing a text object operation */
     ensure_tag_is_set(pgs, pgs->device, GS_TEXT_TAG);	/* NB: may unset_dev_color */
 
-    if (black_text && pgs->black_text_state == NULL) {
-        gs_color_space *pcs_curr = gs_currentcolorspace_inline(pgs);
-        gs_color_space *pcs_alt = gs_swappedcolorspace_inline(pgs);
-
-        pgs->black_text_state = gsicc_blacktext_state_new(pgs->memory);
-        if (pgs->black_text_state == NULL)
-            return gs_error_VMerror;
-
-        rc_increment_cs(pcs_curr);
-        rc_increment_cs(pcs_alt);
-        pgs->black_text_state->pcs[0] = pcs_curr;
-        pgs->black_text_state->pcs[1] = pcs_alt;
-
-        pgs->black_text_state->pcc[0] = pgs->color[0].ccolor;
-        cs_adjust_color_count(pgs, 1); /* The set_gray will do a decrement */
-        pgs->black_text_state->value[0] = pgs->color[0].ccolor->paint.values[0];
-        gs_setgray(pgs, 0.0);
-
-        gs_swapcolors_quick(pgs);
-
-        pgs->black_text_state->pcc[1] = pgs->color[0].ccolor;
-        cs_adjust_color_count(pgs, 1);
-        pgs->black_text_state->value[1] = pgs->color[0].ccolor->paint.values[0];
-        gs_setgray(pgs, 0.0);
-
-        gs_swapcolors_quick(pgs);
-
-        pgs->black_text_state->is_fill = pgs->is_fill_color;
+    if (black_text && pgs->black_textvec_state == NULL) {
+        gsicc_setup_blacktextvec(pgs, (gx_device *)pgs->device, true);
     }
 
     code = gx_set_dev_color(pgs);
@@ -405,7 +379,7 @@ gs_text_begin(gs_gstate * pgs, const gs_text_params_t * text,
     /* we need to know if we are doing a highlevel device.
        Also we need to know if we are doing any stroke
        or stroke fill operations. This determines when
-       we need to release the black_text_state structure. */
+       we need to release the black_textvec_state structure. */
     if (code >= 0 && *ppte != NULL) {
         if (black_text) {
             if (!((*ppte)->k_text_release)) {
@@ -533,7 +507,7 @@ gs_xyshow_begin(gs_gstate * pgs, const byte * str, uint size,
                 const float *x_widths, const float *y_widths,
                 uint widths_size, gs_memory_t * mem, gs_text_enum_t ** ppte)
 {
-    gs_text_params_t text;
+    gs_text_params_t text = {0};
     uint widths_needed;
     int code;
 
@@ -821,8 +795,8 @@ rc_free_text_enum(gs_memory_t * mem, void *obj, client_name_t cname)
 void
 gs_text_release(gs_gstate *pgs, gs_text_enum_t * pte, client_name_t cname)
 {
-    if (pgs != NULL && pgs->black_text_state != NULL)
-        gsicc_restore_black_text(pgs);
+    if (pgs != NULL && pgs->black_textvec_state != NULL)
+        gsicc_restore_blacktextvec(pgs, true);
     rc_decrement_only(pte, cname);
 }
 

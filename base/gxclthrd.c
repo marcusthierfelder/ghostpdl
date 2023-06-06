@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -101,7 +101,7 @@ setup_device_and_mem_for_thread(gs_memory_t *chunk_base_mem, gx_device *dev, boo
     ndev->color_info = dev->color_info;     /* copy before putdeviceparams */
     ndev->pad = dev->pad;
     ndev->log2_align_mod = dev->log2_align_mod;
-    ndev->is_planar = dev->is_planar;
+    ndev->num_planar_planes = dev->num_planar_planes;
     ndev->icc_struct = NULL;
 
     /* If the device ICC profile (or proof) is OI_PROFILE, then that was not handled
@@ -113,12 +113,15 @@ setup_device_and_mem_for_thread(gs_memory_t *chunk_base_mem, gx_device *dev, boo
      * will spot the same profile being used, and treat it as a no-op. Otherwise it will try to find
      * a profile with the 'special' name "OI_PROFILE" and throw an error.
      */
-    if (!gscms_is_threadsafe() || (dev->icc_struct != NULL &&
-        ((dev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE] != NULL &&
-          strncmp(dev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE]->name,
-              OI_PROFILE, strlen(OI_PROFILE)) == 0)
-        || (dev->icc_struct->proof_profile != NULL &&
-        strncmp(dev->icc_struct->proof_profile->name, OI_PROFILE, strlen(OI_PROFILE)) == 0)))) {
+#define DEV_PROFILE_IS(DEV, PROFILE, MATCH) \
+    ((DEV)->icc_struct != NULL &&\
+     (DEV)->icc_struct->PROFILE != NULL &&\
+     strcmp((DEV)->icc_struct->PROFILE->name, MATCH) == 0)
+
+    if (bg_print ||
+        !gscms_is_threadsafe() ||
+        DEV_PROFILE_IS(dev, device_profile[GS_DEFAULT_DEVICE_PROFILE], OI_PROFILE) ||
+        DEV_PROFILE_IS(dev, proof_profile, OI_PROFILE)) {
         ndev->icc_struct = gsicc_new_device_profile_array(ndev);
         if (!ndev->icc_struct) {
             emprintf1(ndev->memory,
@@ -182,7 +185,7 @@ setup_device_and_mem_for_thread(gs_memory_t *chunk_base_mem, gx_device *dev, boo
                (intptr_t)ncdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE],
                (intptr_t)ncdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE]->profile_handle);
     /* If the device is_planar, then set the flag in the new_device and the procs */
-    if ((ncdev->is_planar = cdev->is_planar))
+    if ((ncdev->num_planar_planes = cdev->num_planar_planes))
         gdev_prn_set_procs_planar(ndev);
 
     /* Make sure that the ncdev BandHeight matches what we used when writing the clist, but
@@ -211,7 +214,7 @@ setup_device_and_mem_for_thread(gs_memory_t *chunk_base_mem, gx_device *dev, boo
 
     if (ncdev->page_info.tile_cache_size != cdev->page_info.tile_cache_size) {
         emprintf2(thread_mem,
-                   "clist_setup_render_threads: tile_cache_size mismatch. New size=%d, should be %d\n",
+                   "clist_setup_render_threads: tile_cache_size mismatch. New size=%"PRIdSIZE", should be %"PRIdSIZE"\n",
                    ncdev->page_info.tile_cache_size, cdev->page_info.tile_cache_size);
         goto out_cleanup;
     }
@@ -252,7 +255,7 @@ setup_device_and_mem_for_thread(gs_memory_t *chunk_base_mem, gx_device *dev, boo
             }
             rc_increment(*cachep);
                 ncdev->icc_cache_cl = *cachep;
-        } else if ((ncdev->icc_cache_cl = gsicc_cache_new(thread_mem)) == NULL)
+        } else if ((ncdev->icc_cache_cl = gsicc_cache_new(thread_mem->thread_safe_memory)) == NULL)
             goto out_cleanup;
     }
     if (bg_print) {
@@ -995,7 +998,7 @@ clist_process_page(gx_device *dev, gx_process_page_options_t *options)
             return code;
     }
 
-    render_plane.index = -1;
+    gx_render_plane_init(&render_plane, dev, -1);
     for (y = 0; y < dev->height; y += lines_rasterized)
     {
         line_count = band_height;

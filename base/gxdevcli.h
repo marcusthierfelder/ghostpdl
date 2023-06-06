@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -705,7 +705,6 @@ typedef struct gdev_nupcontrol_s {
 typedef struct gdev_pagelist_s {
         rc_header rc;
         char *Pages;
-        int PagesSize;
 } gdev_pagelist;
 
 #define dev_t_proc_initialize_device_procs(proc, dev_t)\
@@ -743,7 +742,7 @@ typedef struct gdev_pagelist_s {
         int height;			/* height in pixels */\
         int pad;                        /* pad to use for buffers; 0 for default */\
         int log2_align_mod;             /* align to use for buffers; 0 for default */\
-        int is_planar;                  /* 1 planar, 0 for chunky */\
+        int num_planar_planes;          /* 1 planar, 0 for chunky */\
         int LeadingEdge;                /* see below */\
         float MediaSize[2];		/* media dimensions in points */\
         float ImagingBBox[4];		/* imageable region in points */\
@@ -781,6 +780,7 @@ typedef struct gdev_pagelist_s {
         gs_graphics_type_tag_t   graphics_type_tag;   /* e.g. vector, image or text */\
         int interpolate_control;      /* default 1 (use image /Interpolate value), 0 is NOINTERPOLATE. */\
                                       /* > 1 limits interpolation, < 0 forces interpolation */\
+        int non_strict_bounds;        /* If set, callers cannot rely on clipping fills etc to declared device bounds. */\
         gx_page_device_procs page_procs;       /* must be last */\
                 /* end of std_device_body */\
         gx_device_procs procs	/* object procedures */
@@ -996,6 +996,16 @@ typedef enum FILTER_FLAGS {
     const gx_clip_path *pcpath)
 #define dev_proc_fill_stroke_path(proc)\
   dev_t_proc_fill_stroke_path(proc, gx_device)
+
+                /* Added in release 9.57 */
+
+#define dev_t_proc_lock_pattern(proc, dev_t)\
+  int proc(dev_t *dev,\
+           gs_gstate *pgs,\
+           gs_id pattern_id,\
+           int lock)
+#define dev_proc_lock_pattern(proc)\
+  dev_t_proc_lock_pattern(proc, gx_device)
 
                 /* Added in release 3.60 */
 
@@ -1508,6 +1518,7 @@ typedef struct {
         dev_t_proc_process_page((*process_page), dev_t);\
         dev_t_proc_transform_pixel_region((*transform_pixel_region), dev_t);\
         dev_t_proc_fill_stroke_path((*fill_stroke_path), dev_t);\
+        dev_t_proc_lock_pattern((*lock_pattern), dev_t);\
 }
 
 /*

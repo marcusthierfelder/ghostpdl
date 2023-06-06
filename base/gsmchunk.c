@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -369,6 +369,20 @@ static int dump_free_size(gs_memory_t *mem, chunk_free_node_t *node, int depth, 
     return 1 + count + dump_free_size(mem, node->right_size, depth + 2 + (depth&1), size, addr);
 }
 
+#ifdef DEBUG_CHUNK_PRINT
+static size_t
+largest_free_block(chunk_free_node_t *size)
+{
+    if (size == NULL)
+        return 0;
+    while (1) {
+        if (size->right_size == NULL)
+            return size->size;
+        size = size->right_size;
+    }
+}
+#endif
+
 void
 gs_memory_chunk_dump_memory(const gs_memory_t *mem)
 {
@@ -381,10 +395,12 @@ gs_memory_chunk_dump_memory(const gs_memory_t *mem)
 
 #ifdef DEBUG_CHUNK_PRINT
     dmlprintf1(cmem->target, "Chunk "PRI_INTPTR":\n", (intptr_t)cmem);
+    dmlprintf3(cmem->target, "Used=%"PRIxSIZE", Max Used=%"PRIxSIZE", Total Free=%"PRIxSIZE"\n", cmem->used, cmem->max_used, cmem->total_free);
+    dmlprintf1(cmem->target, "Largest free block=%d bytes\n", largest_free_block(cmem->free_size));
 #ifdef DEBUG_CHUNK_PRINT_SLABS
     {
         chunk_slab_t *slab;
-        dmlprintf(cmem->target, "Slabs\n");
+        dmlprintf(cmem->target, "Slabs:\n");
         for (slab = cmem->slabs; slab != NULL; slab = slab->next)
             dmlprintf1(cmem->target, " "PRI_INTPTR"\n", (intptr_t)slab);
     }
@@ -778,16 +794,16 @@ chunk_obj_alloc(gs_memory_t *mem, size_t size, gs_memory_type_ptr_t type, client
 
 #ifdef DEBUG_CHUNK_PRINT
 #ifdef DEBUG_SEQ
-    dmlprintf4(cmem->target, "Event %x: malloc(chunk="PRI_INTPTR", size="PRIxSIZE", cname=%s)\n",
+    dmlprintf4(mem, "Event %x: malloc(chunk="PRI_INTPTR", size=%"PRIxSIZE", cname=%s)\n",
                cmem->sequence, (intptr_t)cmem, newsize, cname);
 #else
-    dmlprintf3(cmem->target, "malloc(chunk="PRI_INTPTR", size="PRIxSIZE", cname=%s)\n",
+    dmlprintf3(mem, "malloc(chunk="PRI_INTPTR", size=%"PRIxSIZE", cname=%s)\n",
                (intptr_t)cmem, newsize, cname);
 #endif
 #endif
 
     /* Large blocks are allocated directly */
-    if (SINGLE_OBJECT_CHUNK(newsize)) {
+    if (SINGLE_OBJECT_CHUNK(size)) {
         obj = (chunk_obj_node_t *)gs_alloc_bytes_immovable(cmem->target, newsize, cname);
         if (obj == NULL)
             return NULL;
@@ -906,6 +922,7 @@ chunk_obj_alloc(gs_memory_t *mem, size_t size, gs_memory_type_ptr_t type, client
             /* No appropriate free space slot. We need to allocate a new slab. */
             chunk_slab_t *slab;
             uint slab_size = newsize + SIZEOF_ROUND_ALIGN(chunk_slab_t);
+
             if (slab_size <= (CHUNK_SIZE>>1))
                 slab_size = CHUNK_SIZE;
             slab = (chunk_slab_t *)gs_alloc_bytes_immovable(cmem->target, slab_size, cname);
@@ -956,10 +973,10 @@ chunk_obj_alloc(gs_memory_t *mem, size_t size, gs_memory_type_ptr_t type, client
                    client_name_string(cname), size, (intptr_t) obj);
 #ifdef DEBUG_CHUNK_PRINT
 #ifdef DEBUG_SEQ
-    dmlprintf5(cmem->target, "Event %x: malloced(chunk="PRI_INTPTR", addr="PRI_INTPTR", size=%"PRIxSIZE", cname=%s)\n",
+    dmlprintf5(mem, "Event %x: malloced(chunk="PRI_INTPTR", addr="PRI_INTPTR", size=%"PRIxSIZE", cname=%s)\n",
                obj->sequence, (intptr_t)cmem, (intptr_t)obj, obj->size, cname);
 #else
-    dmlprintf4(cmem->target, "malloced(chunk="PRI_INTPTR", addr="PRI_INTPTR", size=%"PRI_xSIZE", cname=%s)\n",
+    dmlprintf4(mem, "malloced(chunk="PRI_INTPTR", addr="PRI_INTPTR", size=%"PRIxSIZE", cname=%s)\n",
                (intptr_t)cmem, (intptr_t)obj, obj->size, cname);
 #endif
 #endif
@@ -1345,6 +1362,7 @@ chunk_status(gs_memory_t * mem, gs_memory_status_t * pstat)
     pstat->allocated = cmem->used;
     pstat->used = cmem->used - cmem->total_free;
     pstat->max_used = cmem->max_used;
+    pstat->limit = (size_t)~1;      /* No limit on allocations */
     pstat->is_thread_safe = false;	/* this allocator does not have an internal mutex */
 }
 

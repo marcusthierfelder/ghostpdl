@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Annotation handling for the PDF interpreter */
@@ -24,6 +24,7 @@
 #include "pdf_loop_detect.h"
 #include "pdf_colour.h"
 #include "pdf_trans.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_misc.h"
 #include "pdf_optcontent.h"
@@ -242,7 +243,11 @@ static int pdfi_annot_position_AP(pdf_context *ctx, pdf_dict *annot, pdf_stream 
 
         if (xscale * yscale <= 0) {
             dbgmprintf(ctx->memory, "ANNOT: Ignoring annotation with scale factor of 0\n");
-            code = 0;
+            if (ctx->args.pdfstoponerror)
+                code = gs_note_error(gs_error_rangecheck);
+            else
+                code = 0;
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_ZEROSCALE_ANNOT, "pdfi_annot_position_AP", "");
             goto exit;
         }
 
@@ -268,7 +273,9 @@ static int pdfi_annot_draw_AP(pdf_context *ctx, pdf_dict *annot, pdf_obj *NormAP
 
     if (NormAP == NULL)
         return 0;
-    if (NormAP->type != PDF_STREAM)
+    if (pdfi_type_of(NormAP) == PDF_NULL)
+        return 0;
+    if (pdfi_type_of(NormAP) != PDF_STREAM)
         return_error(gs_error_typecheck);
 
     code = pdfi_op_q(ctx);
@@ -648,24 +655,53 @@ static int pdfi_form_get_inheritable(pdf_context *ctx, pdf_dict *field, const ch
 {
     int code = 0;
     pdf_dict *Parent = NULL;
+    bool known = false;
 
     /* Check this field */
     code = pdfi_dict_knownget_type(ctx, field, Key, type, o);
-    if (code != 0) goto exit;
+    if (code != 0) goto exit1;
 
-    /* If not found, recursively check Parent, if any */
-    code = pdfi_dict_knownget_type(ctx, field, "Parent", PDF_DICT, (pdf_obj **)&Parent);
-    if (code < 0) goto exit;
-    if (code > 0) {
-        /* Check Parent */
+    code = pdfi_loop_detector_mark(ctx);
+    if (code < 0)
+        goto exit;
+
+    /* Check for Parent. Do not store the dereferenced Parent back to the dictionary
+     * as this can cause circular references.
+     */
+    code = pdfi_dict_known(ctx, field, "Parent", &known);
+    if (code >= 0 && known == true)
+    {
+        code = pdfi_dict_get_no_store_R(ctx, field, "Parent", (pdf_obj **)&Parent);
+        if (code < 0)
+            goto exit;
+
+        if (pdfi_type_of(Parent) != PDF_DICT) {
+            if (pdfi_type_of(Parent) == PDF_INDIRECT) {
+                pdf_indirect_ref *o = (pdf_indirect_ref *)Parent;
+
+                code = pdfi_dereference(ctx, o->ref_object_num, o->ref_generation_num, (pdf_obj **)&Parent);
+                pdfi_countdown(o);
+                goto exit;
+            } else {
+                code = gs_note_error(gs_error_typecheck);
+                goto exit;
+            }
+        }
         code = pdfi_form_get_inheritable(ctx, Parent, Key, type, o);
+        if (code <= 0) {
+            if (ctx->AcroForm)
+                code = pdfi_dict_knownget_type(ctx, ctx->AcroForm, Key, type, o);
+        }
     } else {
         /* No Parent, so check AcroForm, if any */
         if (ctx->AcroForm)
             code = pdfi_dict_knownget_type(ctx, ctx->AcroForm, Key, type, o);
     }
 
- exit:
+exit:
+    (void)pdfi_loop_detector_cleartomark(ctx);
+
+exit1:
     pdfi_countdown(Parent);
     return code;
 }
@@ -1067,6 +1103,13 @@ pdfi_annot_display_formatted_text(pdf_context *ctx, pdf_dict *annot,
         /* If EOL character encountered, move down to next line */
         if (charlen == 1) { /* Can only check this for ASCII font */
             if (ch == '\r' || ch == '\n') {
+                if (linestart == true) {
+                    pdf_string dummy;
+
+                    dummy.length = 0;
+                    code = pdfi_annot_display_text(ctx, annot, 0, -lineheight, &dummy);
+                    if (code < 0) goto exit;
+                }
                 linestart = true;
                 continue;
             }
@@ -1474,11 +1517,13 @@ static int pdfi_annot_draw_LE(pdf_context *ctx, pdf_dict *annot,
     double dx, dy;
     double angle;
     int code;
+    pdf_obj_type type;
 
     code = pdfi_dict_knownget(ctx, annot, "LE", (pdf_obj **)&LE);
     if (code <= 0)
         goto exit;
-    if (LE->type != PDF_ARRAY && LE->type != PDF_NAME) {
+    type = pdfi_type_of(LE);
+    if (type != PDF_ARRAY && type != PDF_NAME) {
         code = gs_note_error(gs_error_typecheck);
         goto exit;
     }
@@ -1489,7 +1534,7 @@ static int pdfi_annot_draw_LE(pdf_context *ctx, pdf_dict *annot,
     if (code < 0)
         angle = 0;
 
-    if (LE->type == PDF_ARRAY) {
+    if (type == PDF_ARRAY) {
         code = pdfi_array_get_type(ctx, (pdf_array *)LE, 0, PDF_NAME, (pdf_obj **)&LE1);
         if (code < 0) goto exit;
 
@@ -1553,34 +1598,36 @@ static int pdfi_annot_get_NormAP(pdf_context *ctx, pdf_dict *annot, pdf_obj **No
     /* Nothing found */
     if (code == 0) goto exit;
 
-    if (baseAP->type == PDF_STREAM) {
-        /* Use baseAP for the AP */
-        AP = (pdf_stream *)baseAP;
-        baseAP = NULL;
-    } else {
-        if (baseAP->type != PDF_DICT) {
+    switch (pdfi_type_of(baseAP)) {
+        case PDF_STREAM:
+            /* Use baseAP for the AP */
+            AP = (pdf_stream *)baseAP;
+            baseAP = NULL;
+            break;
+        case PDF_DICT:
+            code = pdfi_dict_knownget_type(ctx, annot, "AS", PDF_NAME, (pdf_obj **)&AS);
+            if (code < 0) goto exit;
+            if (code == 0) {
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_ANNOT_AP_ERROR, "pdfi_annot_get_NormAP", "WARNING Annotation has non-stream AP but no AS.  Don't know what to render");
+                goto exit;
+            }
+
+            /* Lookup the AS in the NormAP and use that as the AP */
+            code = pdfi_dict_get_by_key(ctx, (pdf_dict *)baseAP, AS, (pdf_obj **)&AP);
+            if (code < 0) {
+                /* Apparently this is not an error, just silently don't have an AP */
+                *NormAP = (pdf_obj *)TOKEN_null;
+                code = 0;
+                goto exit;
+            }
+            if (pdfi_type_of(AP) != PDF_STREAM) {
+                code = gs_note_error(gs_error_typecheck);
+                goto exit;
+            }
+            break;
+        default:
             code = gs_error_typecheck;
             goto exit;
-        }
-
-        code = pdfi_dict_knownget_type(ctx, annot, "AS", PDF_NAME, (pdf_obj **)&AS);
-        if (code < 0) goto exit;
-        if (code == 0) {
-            pdfi_set_warning(ctx, 0, NULL, W_PDF_ANNOT_AP_ERROR, "pdfi_annot_get_NormAP", "WARNING Annotation has non-stream AP but no AS.  Don't know what to render");
-            goto exit;
-        }
-
-        /* Lookup the AS in the NormAP and use that as the AP */
-        code = pdfi_dict_get_by_key(ctx, (pdf_dict *)baseAP, AS, (pdf_obj **)&AP);
-        if (code < 0) {
-            /* Apparently this is not an error, just silently don't have an AP */
-            code = 0;
-            goto exit;
-        }
-        if (AP->type != PDF_STREAM) {
-            code = gs_note_error(gs_error_typecheck);
-            goto exit;
-        }
     }
 
    *NormAP = (pdf_obj *)AP;
@@ -1617,7 +1664,7 @@ static int pdfi_annot_draw_Link(pdf_context *ctx, pdf_dict *annot, pdf_obj *Norm
 
  exit:
     code1 = pdfi_annot_end_transparency(ctx, annot);
-    if (code < 0) code = code1;
+    if (code == 0) code = code1;
 
     *render_done = true;
     return code;
@@ -1639,10 +1686,7 @@ static int pdfi_annot_draw_InkList(pdf_context *ctx, pdf_dict *annot, pdf_array 
     pdf_array *points = NULL;
     int i;
     int num_points;
-    double x0, y0, x1, y1, x2, y2, x3, y3, xc1, yc1, xc2, yc2, xc3, yc3;
-    double len1, len2, len3, k1, k2, xm1, ym1, xm2, ym2;
-    double ctrl1_x, ctrl1_y, ctrl2_x, ctrl2_y;
-    const double smooth_value = 1; /* from 0..1 range */
+    double x1, y1, x2, y2;
 
     for (i=0; i<pdfi_array_size(InkList); i++) {
         int j;
@@ -1664,68 +1708,13 @@ static int pdfi_annot_draw_InkList(pdf_context *ctx, pdf_dict *annot, pdf_array 
         if (num_points == 2)
             goto stroke;
 
-        code = pdfi_array_get_number(ctx, points, 2, &x2);
-        if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, points, 3, &y2);
-        if (code < 0) goto exit;
-        if (num_points == 4) {
-            code = gs_lineto(ctx->pgs, x2, y2);
-            if (code < 0)
-                goto exit;
-            goto stroke;
-        }
-
-        x0 = 2*x1 - x2;
-        y0 = 2*y1 - y2;
-
-        for (j = 4; j <= num_points; j += 2) {
-            if (j < num_points) {
-                code = pdfi_array_get_number(ctx, points, j, &x3);
-                if (code < 0) goto exit;
-                code = pdfi_array_get_number(ctx, points, j+1, &y3);
-                if (code < 0) goto exit;
-            } else {
-                x3 = 2*x2 - x1;
-                y3 = 2*y2 - y1;
-            }
-
-            xc1 = (x0 + x1) / 2.0;
-            yc1 = (y0 + y1) / 2.0;
-            xc2 = (x1 + x2) / 2.0;
-            yc2 = (y1 + y2) / 2.0;
-            xc3 = (x2 + x3) / 2.0;
-            yc3 = (y2 + y3) / 2.0;
-
-            len1 = hypot(x1 - x0, y1 - y0);
-            len2 = hypot(x2 - x1, y2 - y1);
-            len3 = hypot(x3 - x2, y3 - y2);
-
-            if ((len1 + len2) == 0)
-                k1 = 0;
-            else
-                k1 = len1 / (len1 + len2);
-            if ((len2 + len3) == 0)
-                k2 = 0;
-            else
-                k2 = len2 / (len2 + len3);
-
-            xm1 = xc1 + (xc2 - xc1) * k1;
-            ym1 = yc1 + (yc2 - yc1) * k1;
-
-            xm2 = xc2 + (xc3 - xc2) * k2;
-            ym2 = yc2 + (yc3 - yc2) * k2;
-
-            ctrl1_x = xm1 + (xc2 - xm1) * smooth_value + x1 - xm1;
-            ctrl1_y = ym1 + (yc2 - ym1) * smooth_value + y1 - ym1;
-
-            ctrl2_x = xm2 + (xc2 - xm2) * smooth_value + x2 - xm2;
-            ctrl2_y = ym2 + (yc2 - ym2) * smooth_value + y2 - ym2;
-
-            code = gs_curveto(ctx->pgs, ctrl1_x, ctrl1_y, ctrl2_x, ctrl2_y, x2, y2);
+        for (j = 2; j < num_points; j += 2) {
+            code = pdfi_array_get_number(ctx, points, j, &x2);
             if (code < 0) goto exit;
-
-            x0 = x1, x1 = x2, x2 = x3;
-            y0 = y1, y1 = y2, y2 = y3;
+            code = pdfi_array_get_number(ctx, points, j+1, &y2);
+            if (code < 0) goto exit;
+            code = gs_lineto(ctx->pgs, x2, y2);
+            if (code < 0) goto exit;
         }
 
     stroke:
@@ -2864,7 +2853,6 @@ static int pdfi_annot_draw_Popup(pdf_context *ctx, pdf_dict *annot, pdf_obj *Nor
     bool has_color;
     gs_rect rect, rect2;
     bool need_grestore = false;
-    double x, y;
 
     /* Render only if open */
     code = pdfi_dict_get_bool(ctx, annot, "Open", &Open);
@@ -2939,18 +2927,23 @@ static int pdfi_annot_draw_Popup(pdf_context *ctx, pdf_dict *annot, pdf_obj *Nor
     code = pdfi_dict_knownget_type(ctx, Parent, "Contents", PDF_STRING, (pdf_obj **)&Contents);
     if (code < 0) goto exit;
     if (code > 0) {
+        gs_rect text_rect;
+
         code = pdfi_gsave(ctx);
         if (code < 0) goto exit;
         need_grestore = true;
         code = pdfi_gs_setgray(ctx, 0);
         if (code < 0) goto exit;
-        x = rect.p.x + 5;
-        y = rect.q.y - 30;
+
+        text_rect.p.x = rect.p.x + 3;
+        text_rect.q.x = rect.q.x - 3;
+        text_rect.p.y = rect.p.y + 3;
+        text_rect.q.y = rect.q.y - 18;
 
         code = pdfi_annot_set_font(ctx, "Helvetica", 9);
         if (code < 0) goto exit;
 
-        code = pdfi_annot_display_simple_text(ctx, annot, x, y, Contents);
+        code = pdfi_annot_display_formatted_text(ctx, annot, &text_rect, Contents, false);
         if (code < 0) goto exit;
 
         code = pdfi_grestore(ctx);
@@ -3079,68 +3072,190 @@ static int pdfi_annot_draw_PolyLine(pdf_context *ctx, pdf_dict *annot, pdf_obj *
 {
     int code = 0;
     int code1 = 0;
-    pdf_array *Vertices = NULL;
+    pdf_array *Vertices = NULL, *Path = NULL, *Line = NULL;
     bool drawit;
     int size;
-    double x1, y1, x2, y2;
+    double x1, y1, x2, y2, x3, y3, ends[8];
+    bool Vertices_known = false, Path_known = false;
 
     code = pdfi_annot_start_transparency(ctx, annot);
     if (code < 0) goto exit1;
 
-    code = pdfi_dict_knownget_type(ctx, annot, "Vertices", PDF_ARRAY, (pdf_obj **)&Vertices);
-    if (code < 0) goto exit;
-
-    if (code == 0) {
-        gs_note_error(gs_error_undefined);
-        goto exit;
-    }
-
-    size = pdfi_array_size(Vertices);
-    if (size == 0) {
-        code = 0;
-        goto exit;
-    }
-    code = pdfi_annot_path_array(ctx, annot, Vertices);
+    code = pdfi_dict_known(ctx, annot, "Vertices", &Vertices_known);
+    if (code < 0) goto exit1;
+    code = pdfi_dict_known(ctx, annot, "Path", &Path_known);
     if (code < 0) goto exit1;
 
-    code = pdfi_annot_setcolor(ctx, annot, false, &drawit);
-    if (code < 0) goto exit;
+    code = pdfi_gsave(ctx);
+    if (code < 0) goto exit1;
 
-    code = pdfi_annot_draw_border(ctx, annot, true);
-    if (code < 0) goto exit;
+    /* If both are known, or neither are known, then there is a problem */
+    if (Vertices_known == Path_known) {
+        code = gs_note_error(gs_error_undefined);
+        goto exit;
+    }
 
-    if (size >= 4) {
-        code = pdfi_array_get_number(ctx, Vertices, 0, &x1);
-        if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, 1, &y1);
-        if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, 2, &x2);
-        if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, 3, &y2);
-        if (code < 0) goto exit;
-        code = pdfi_annot_draw_LE(ctx, annot, x1, y1, x2, y2, 1);
+    if (Vertices_known) {
+        code = pdfi_dict_get_type(ctx, annot, "Vertices", PDF_ARRAY, (pdf_obj **)&Vertices);
         if (code < 0) goto exit;
 
-        code = pdfi_array_get_number(ctx, Vertices, size-4, &x1);
+        size = pdfi_array_size(Vertices);
+        if (size == 0) {
+            code = 0;
+            goto exit;
+        }
+        code = pdfi_annot_path_array(ctx, annot, Vertices);
+        if (code < 0) goto exit1;
+
+        code = pdfi_annot_setcolor(ctx, annot, false, &drawit);
         if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, size-3, &y1);
+
+        code = pdfi_annot_draw_border(ctx, annot, true);
         if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, size-2, &x2);
+
+        if (size >= 4) {
+            code = pdfi_array_get_number(ctx, Vertices, 0, &x1);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, 1, &y1);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, 2, &x2);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, 3, &y2);
+            if (code < 0) goto exit;
+            code = pdfi_annot_draw_LE(ctx, annot, x1, y1, x2, y2, 1);
+            if (code < 0) goto exit;
+
+            code = pdfi_array_get_number(ctx, Vertices, size-4, &x1);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, size-3, &y1);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, size-2, &x2);
+            if (code < 0) goto exit;
+            code = pdfi_array_get_number(ctx, Vertices, size-1, &y2);
+            if (code < 0) goto exit;
+            code = pdfi_annot_draw_LE(ctx, annot, x1, y1, x2, y2, 2);
+            if (code < 0) goto exit;
+        }
+    } else {
+        int i = 0;
+        int state = 0;
+
+        memset(ends, 0x00, 8 * sizeof(double));
+        code = pdfi_dict_get_type(ctx, annot, "Path", PDF_ARRAY, (pdf_obj **)&Path);
         if (code < 0) goto exit;
-        code = pdfi_array_get_number(ctx, Vertices, size-1, &y2);
+
+        if (pdfi_array_size(Path) < 2)
+            goto exit;
+
+        code = pdfi_annot_setcolor(ctx, annot, false, &drawit);
         if (code < 0) goto exit;
-        code = pdfi_annot_draw_LE(ctx, annot, x1, y1, x2, y2, 2);
+
+        code = pdfi_annot_draw_border(ctx, annot, true);
         if (code < 0) goto exit;
+
+        for (i = 0; i < pdfi_array_size(Path); i++) {
+            code = pdfi_array_get_type(ctx, Path, i, PDF_ARRAY, (pdf_obj **)&Line);
+            if (code < 0)
+                goto exit;
+            switch(pdfi_array_size(Line)) {
+                case 2:
+                    code = pdfi_array_get_number(ctx, Line, 0, &x1);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 1, &y1);
+                    if (code < 0)
+                        goto exit;
+                    if (state == 0) {
+                        state = 1;
+                        code = gs_moveto(ctx->pgs, x1, y1);
+                        ends[0] = ends[4] = x1;
+                        ends[1] = ends[5] = y1;
+                    } else {
+                        if (state == 1) {
+                            ends[2] = ends[6] = x1;
+                            ends[3] = ends[7] = y1;
+                            state = 2;
+                        } else {
+                            ends[4] = ends[6];
+                            ends[5] = ends[7];
+                            ends[6] = x1;
+                            ends[7] = y1;
+                        }
+                        code = gs_lineto(ctx->pgs, x1, y1);
+                    }
+                    pdfi_countdown(Line);
+                    Line = NULL;
+                    break;
+                case 6:
+                    code = pdfi_array_get_number(ctx, Line, 0, &x1);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 1, &y1);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 2, &x2);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 3, &y2);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 4, &x3);
+                    if (code < 0)
+                        goto exit;
+                    code = pdfi_array_get_number(ctx, Line, 5, &y3);
+                    if (code < 0)
+                        goto exit;
+                    if (state == 1) {
+                        ends[2] = x1;
+                        ends[3] = y1;
+                        ends[4] = x2;
+                        ends[5] = y2;
+                        ends[6] = x3;
+                        ends[7] = y3;
+                        state = 2;
+                    }
+                    ends[4] = x2;
+                    ends[5] = y2;
+                    ends[6] = x3;
+                    ends[7] = y3;
+                    code = gs_curveto(ctx->pgs, x1, y1, x2, y2, x3, y3);
+                    pdfi_countdown(Line);
+                    Line = NULL;
+                    break;
+                default:
+                    pdfi_countdown(Line);
+                    Line = NULL;
+                    code = gs_note_error(gs_error_rangecheck);
+                    break;
+            }
+            if (code < 0)
+                break;
+        }
+        if (code < 0)
+            goto exit;
+
+        code = gs_stroke(ctx->pgs);
+        if (code < 0)
+            goto exit;
+
+        code = pdfi_annot_draw_LE(ctx, annot, ends[0], ends[1], ends[2], ends[3], 1);
+        if (code < 0)
+            goto exit;
+        code = pdfi_annot_draw_LE(ctx, annot, ends[4], ends[5], ends[6], ends[7], 2);
     }
 
  exit:
     code1 = pdfi_annot_end_transparency(ctx, annot);
     if (code >= 0)
         code = code1;
+    code1 = pdfi_grestore(ctx);
+    if (code >= 0) code = code1;
 
  exit1:
     *render_done = true;
+    pdfi_countdown(Line);
     pdfi_countdown(Vertices);
+    pdfi_countdown(Path);
     return code;
 }
 
@@ -3629,9 +3744,9 @@ static int pdfi_annot_draw_Widget(pdf_context *ctx, pdf_dict *annot, pdf_obj *No
 {
     int code = 0;
     bool found_T = false;
-    bool found_TF = false;
+    bool found_FT = false, known = false;
     pdf_obj *T = NULL;
-    pdf_obj *TF = NULL;
+    pdf_obj *FT = NULL;
     pdf_dict *Parent = NULL;
     pdf_dict *currdict = NULL;
 
@@ -3650,33 +3765,71 @@ static int pdfi_annot_draw_Widget(pdf_context *ctx, pdf_dict *annot, pdf_obj *No
     /* TODO: See top part of pdf_draw.ps/drawwidget
      * check for /FT and /T and stuff
      */
+    code = pdfi_loop_detector_mark(ctx);
+    if (code < 0)
+        goto exit;
+
     currdict = annot;
     pdfi_countup(currdict);
     while (true) {
+        if (currdict->object_num != 0) {
+            code = pdfi_loop_detector_add_object(ctx, currdict->object_num);
+            if (code < 0)
+                break;
+        }
+
         code = pdfi_dict_knownget(ctx, currdict, "T", &T);
         if (code < 0) goto exit;
         if (code > 0) {
             found_T = true;
-            break;
+            pdfi_countdown(T);
+            T = NULL;
+            if (found_FT)
+                break;
         }
-        code = pdfi_dict_knownget(ctx, currdict, "TF", &TF);
+        code = pdfi_dict_knownget(ctx, currdict, "FT", &FT);
         if (code < 0) goto exit;
         if (code > 0) {
-            found_TF = true;
-            break;
+            found_FT = true;
+            pdfi_countdown(FT);
+            FT = NULL;
+            if (found_T)
+                break;
         }
-        /* Check for Parent */
-        code = pdfi_dict_knownget_type(ctx, currdict, "Parent", PDF_DICT, (pdf_obj **)&Parent);
-        if (code < 0) goto exit;
-        if (code == 0)
+        /* Check for Parent. Do not store the dereferenced Parent back to the dictionary
+         * as this can cause circular references.
+         */
+        code = pdfi_dict_known(ctx, currdict, "Parent", &known);
+        if (code >= 0 && known == true)
+        {
+            code = pdfi_dict_get_no_store_R(ctx, currdict, "Parent", (pdf_obj **)&Parent);
+            if (code < 0) {
+                (void)pdfi_loop_detector_cleartomark(ctx);
+                goto exit;
+            }
+            if (pdfi_type_of(Parent) != PDF_DICT) {
+                if (pdfi_type_of(Parent) == PDF_INDIRECT) {
+                    pdf_indirect_ref *o = (pdf_indirect_ref *)Parent;
+
+                    code = pdfi_dereference(ctx, o->ref_object_num, o->ref_generation_num, (pdf_obj **)&Parent);
+                    pdfi_countdown(o);
+                    if (code < 0)
+                        break;
+                } else {
+                    break;
+                }
+            }
+            pdfi_countdown(currdict);
+            currdict = Parent;
+            Parent = NULL;
+        } else
             break;
-        pdfi_countdown(currdict);
-        currdict = Parent;
-        pdfi_countup(currdict);
     }
 
+    (void)pdfi_loop_detector_cleartomark(ctx);
+
     code = 0;
-    if (!found_T && !found_TF) {
+    if (!found_T || !found_FT) {
         *render_done = true;
         dmprintf(ctx->memory, "**** Warning: A Widget annotation dictionary lacks either the FT or T key.\n");
         dmprintf(ctx->memory, "              Acrobat ignores such annoataions, annotation will not be rendered.\n");
@@ -3695,8 +3848,6 @@ static int pdfi_annot_draw_Widget(pdf_context *ctx, pdf_dict *annot, pdf_obj *No
     *render_done = true;
 
  exit:
-    pdfi_countdown(T);
-    pdfi_countdown(TF);
     pdfi_countdown(Parent);
     pdfi_countdown(currdict);
     return code;
@@ -3796,8 +3947,8 @@ static bool pdfi_annot_visible(pdf_context *ctx, pdf_dict *annot, pdf_name *subt
         /* Even if Print flag (bit 3) is off, will print if 3D */
         is_visible = ((F & 0x4) != 0) || is_3D;
     } else {
-        /* Not NoView (bit 7) */
-        is_visible = (F & 0x80) == 0;
+        /* Not NoView (bit 6) */
+        is_visible = (F & 0x20) == 0;
     }
 
  exit:
@@ -3949,7 +4100,7 @@ static int pdfi_annot_preserve_modQP(pdf_context *ctx, pdf_dict *annot, pdf_name
     code = pdfi_dict_get(ctx, annot, "QuadPoints", (pdf_obj **)&QP);
     if (code < 0) goto exit;
 
-    if (QP->type != PDF_ARRAY) {
+    if (pdfi_type_of(QP) != PDF_ARRAY) {
         /* Invalid QuadPoints, just delete it because I dunno what to do...
          * TODO: Should flag a warning here
          */
@@ -4023,7 +4174,7 @@ static int pdfi_annot_preserve_modAP(pdf_context *ctx, pdf_dict *annot, pdf_name
     code = pdfi_dict_get(ctx, annot, "AP", (pdf_obj **)&AP);
     if (code < 0) goto exit;
 
-    if (AP->type != PDF_DICT) {
+    if (pdfi_type_of(AP) != PDF_DICT) {
         /* This is an invalid AP, we will flag and delete it below */
         found_ap = false;
         goto exit;
@@ -4036,14 +4187,14 @@ static int pdfi_annot_preserve_modAP(pdf_context *ctx, pdf_dict *annot, pdf_name
         if (code < 0) goto exit;
 
         /* Handle indirect object */
-        if (Value->type != PDF_INDIRECT)
+        if (pdfi_type_of(Value) != PDF_INDIRECT)
             goto loop_continue;
 
         /* Dereference it */
         code = pdfi_dereference(ctx, Value->ref_object_num, Value->ref_generation_num, &object);
         if (code < 0) goto exit;
 
-        if (object->type == PDF_STREAM) {
+        if (pdfi_type_of(object) == PDF_STREAM) {
             /* Get a form label */
             code = pdfi_annot_preserve_nextformlabel(ctx, &labeldata, &labellen);
             if (code < 0) goto exit;
@@ -4111,6 +4262,117 @@ static int pdfi_annot_preserve_modAP(pdf_context *ctx, pdf_dict *annot, pdf_name
 /* Make a temporary copy of the annotation dict with some fields left out or
  * modified, then do a pdfmark on it
  */
+
+const char *PermittedKeys[] = {
+    /* These keys are valid for all annotation types, we specifically do not allow /P or /Parent */
+    "Type",
+    "Subtype",
+    "Rect",
+    "Contents",
+    "NM",
+    "M",
+    "F",
+    "AP",
+    "AS",
+    "Border",
+    "C",
+    "StructParent",
+    "OC",
+    "AF",
+    "ca",
+    "CA",
+    "BM",
+    "Lang",
+    /* Keys by annotation type (some are common to more than one type, only one entry per key) */
+    /* Markup Annotations we specifically do not permit RT, IRT or Popup */
+    "T",
+    "RC",
+    "CreationDate",
+    "Subj",
+    "IT",
+    "ExData",
+    /* Text annotations */
+    "Open",
+    "Name",
+    "State",
+    "StateModel",
+    /* This isn't specified as being allowed, but Acrobat does something with it, so we need to preserve it */
+    "Rotate",
+    /* Link annotations */
+    "A",
+    "Dest",
+    "H",
+    "PA",
+    "QuadPoints",
+    /* FreeText annotations */
+    "DA",
+    "Q",
+    "DS",
+    "CL",
+    "IT",
+    "BE",
+    "RD",
+    "BS",
+    "LE",
+    /* Line Annotations */
+    "L",
+    "LE",
+    "IC",
+    "LL",
+    "LLE",
+    "Cap",
+    "LLO",
+    "CP",
+    "Measure",
+    "CO",
+    /* Square and Circle annotations */
+    "Path",
+    /* Polygon and PolyLine annotations */
+    "Vertices",
+    /* Text Markup annotations */
+    /* Caret annotations */
+    "Sy",
+    /* Rubber Stamp annotations */
+    /* Ink annotations */
+    "InkList",
+    /* Popup annotations */
+    "Open",
+    /* File attachment annotation */
+    "FS",
+    /* Sound annotations */
+    "Sound",
+    /* Movie annotations */
+    "Movie",
+    /* Screen annotations */
+    "MK",
+    "AA",
+    /* We don't handle Widget annotations as annotations, we draw them */
+    /* Printer's Mark annotations */
+    /* Trap Network annotations */
+    /* Watermark annotations */
+    "FixedPrint",
+    "Matrix",
+    "H",
+    "V",
+    /* Redaction annotations */
+    "RO",
+    "OverlayText",
+    "Repeat",
+    /* Projection annotations */
+    /* 3D and RichMedia annotations */
+};
+
+static int isKnownKey(pdf_context *ctx, pdf_name *Key)
+{
+    int i = 0;
+
+    for (i = 0; i < sizeof(PermittedKeys) / sizeof (const char *); i++) {
+        if (pdfi_name_is(Key, PermittedKeys[i]))
+            return 1;
+    }
+    return 0;
+}
+
 static int pdfi_annot_preserve_mark(pdf_context *ctx, pdf_dict *annot, pdf_name *subtype)
 {
     int code = 0;
@@ -4140,51 +4402,44 @@ static int pdfi_annot_preserve_mark(pdf_context *ctx, pdf_dict *annot, pdf_name 
     while (code >= 0) {
         resolve = false;
 
-        if (pdfi_name_is(Key, "Popup") || pdfi_name_is(Key, "IRT") || pdfi_name_is(Key, "RT") ||
-            pdfi_name_is(Key, "P") || pdfi_name_is(Key, "Parent")) {
-            /* Delete some keys
-             * These would not be handled correctly and are optional.
-             * (see pdf_draw.ps/loadannot())
-             * TODO: Could probably handle some of these since they are typically
-             * just references, and we do have a way to handle references?
-             * Look into it later...
-             */
+        if (!isKnownKey(ctx, Key)) {
             code = pdfi_dict_delete_pair(ctx, tempdict, Key);
             if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "AP")) {
-            /* Special handling for AP -- have fun! */
-            code = pdfi_annot_preserve_modAP(ctx, tempdict, Key);
-            if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "QuadPoints")) {
-            code = pdfi_annot_preserve_modQP(ctx, tempdict, Key);
-            if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "A")) {
-            code = pdfi_mark_modA(ctx, tempdict);
-            if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "Dest")) {
-            if (ctx->args.no_pdfmark_dests) {
-                /* If omitting dests, such as for multi-page output, then omit this whole annotation */
-                code = 0;
-                goto exit;
-            }
-            code = pdfi_mark_modDest(ctx, tempdict);
-            if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "StructTreeRoot")) {
-            /* TODO: Bug691785 has Link annots with /StructTreeRoot
-             * It is super-circular, and causes issues.
-             * GS code only adds in certain values for Link so it doesn't
-             * run into a problem.  I am just going to delete it.
-             * There should be a better solution to handle circular stuff
-             * generically.
-             */
-            code = pdfi_dict_delete_pair(ctx, tempdict, Key);
-            if (code < 0) goto exit;
-        } else if (pdfi_name_is(Key, "Sound") || pdfi_name_is(Key, "Movie")) {
-            resolve = false;
         } else {
-            resolve = true;
+            if (pdfi_name_is(Key, "AP")) {
+                /* Special handling for AP -- have fun! */
+                code = pdfi_annot_preserve_modAP(ctx, tempdict, Key);
+                if (code < 0) goto exit;
+            } else if (pdfi_name_is(Key, "QuadPoints")) {
+                code = pdfi_annot_preserve_modQP(ctx, tempdict, Key);
+                if (code < 0) goto exit;
+            } else if (pdfi_name_is(Key, "A")) {
+                code = pdfi_pdfmark_modA(ctx, tempdict);
+                if (code < 0) goto exit;
+            } else if (pdfi_name_is(Key, "Dest")) {
+                if (ctx->args.no_pdfmark_dests) {
+                    /* If omitting dests, such as for multi-page output, then omit this whole annotation */
+                    code = 0;
+                    goto exit;
+                }
+                code = pdfi_pdfmark_modDest(ctx, tempdict);
+                if (code < 0) goto exit;
+            } else if (pdfi_name_is(Key, "StructTreeRoot")) {
+                /* TODO: Bug691785 has Link annots with /StructTreeRoot
+                 * It is super-circular, and causes issues.
+                 * GS code only adds in certain values for Link so it doesn't
+                 * run into a problem.  I am just going to delete it.
+                 * There should be a better solution to handle circular stuff
+                 * generically.
+                 */
+                code = pdfi_dict_delete_pair(ctx, tempdict, Key);
+                if (code < 0) goto exit;
+            } else if (pdfi_name_is(Key, "Sound") || pdfi_name_is(Key, "Movie")) {
+                resolve = false;
+            } else {
+                resolve = true;
+            }
         }
-
         if (resolve) {
             code = pdfi_dict_get_by_key(ctx, annot, (const pdf_name *)Key, &Value);
             if (code < 0) goto exit;
@@ -4216,9 +4471,9 @@ static int pdfi_annot_preserve_mark(pdf_context *ctx, pdf_dict *annot, pdf_name 
     gs_currentmatrix(ctx->pgs, &ctm);
 
     if (pdfi_name_is(subtype, "Link"))
-        code = pdfi_mark_from_dict(ctx, tempdict, &ctm, "LNK");
+        code = pdfi_pdfmark_from_dict(ctx, tempdict, &ctm, "LNK");
     else
-        code = pdfi_mark_from_dict(ctx, tempdict, &ctm, "ANN");
+        code = pdfi_pdfmark_from_dict(ctx, tempdict, &ctm, "ANN");
     if (code < 0) goto exit;
 
  exit:
@@ -4332,6 +4587,12 @@ static int pdfi_annot_handle(pdf_context *ctx, pdf_dict *annot)
 
  exit:
     pdfi_countdown(Subtype);
+    if (code < 0) {
+        dbgmprintf(ctx->memory, "WARNING: Error handling annotation\n");
+        pdfi_set_error(ctx, code, NULL, E_PDF_BAD_ANNOTATION, "pdfi_annot_handle", "");
+        if (!ctx->args.pdfstoponerror)
+            code = 0;
+    }
     return code;
 }
 
@@ -4351,8 +4612,11 @@ int pdfi_do_annotations(pdf_context *ctx, pdf_dict *page_dict)
 
     for (i = 0; i < pdfi_array_size(Annots); i++) {
         code = pdfi_array_get_type(ctx, Annots, i, PDF_DICT, (pdf_obj **)&annot);
-        if (code < 0)
+        if (code < 0) {
+            if (code == gs_error_typecheck)
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_ANNOT_BAD_TYPE, "pdfi_do_annotations", "");
             continue;
+        }
         code = pdfi_annot_handle(ctx, annot);
         if (code < 0 && ctx->args.pdfstoponerror)
             goto exit;

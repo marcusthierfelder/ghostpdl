@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* pdfmark handling for the PDF interpreter */
@@ -29,7 +29,9 @@
 
 #include "gscoord.h"         /* For gs_currentmatrix */
 
-static int pdfi_mark_setparam_obj(pdf_context *ctx, pdf_obj *obj, gs_param_string *entry)
+static int pdfi_get_named_dest(pdf_context *ctx, pdf_obj *Named, pdf_obj **Dest);
+
+static int pdfi_pdfmark_setparam_obj(pdf_context *ctx, pdf_obj *obj, gs_param_string *entry)
 {
     int code = 0;
     byte *data = NULL;
@@ -44,22 +46,22 @@ static int pdfi_mark_setparam_obj(pdf_context *ctx, pdf_obj *obj, gs_param_strin
     return 0;
 }
 
-static int pdfi_mark_setparam_pair(pdf_context *ctx, pdf_name *Key, pdf_obj *Value,
+static int pdfi_pdfmark_setparam_pair(pdf_context *ctx, pdf_name *Key, pdf_obj *Value,
                                    gs_param_string *entry)
 {
     int code = 0;
 
     /* Handle the Key */
-    if (Key->type != PDF_NAME) {
+    if (pdfi_type_of(Key) != PDF_NAME) {
         code = gs_note_error(gs_error_typecheck);
         goto exit;
     }
 
-    code = pdfi_mark_setparam_obj(ctx, (pdf_obj *)Key, entry);
+    code = pdfi_pdfmark_setparam_obj(ctx, (pdf_obj *)Key, entry);
     if (code < 0)
         goto exit;
 
-    code = pdfi_mark_setparam_obj(ctx, Value, entry+1);
+    code = pdfi_pdfmark_setparam_obj(ctx, Value, entry+1);
     if (code < 0)
         goto exit;
 
@@ -69,12 +71,12 @@ static int pdfi_mark_setparam_pair(pdf_context *ctx, pdf_name *Key, pdf_obj *Val
 
 
 /* Note: this isn't part of the obj_to_string() stuff */
-static int pdfi_mark_ctm_str(pdf_context *ctx, gs_matrix *ctm, byte **data, int *len)
+static int pdfi_pdfmark_ctm_str(pdf_context *ctx, gs_matrix *ctm, byte **data, int *len)
 {
     int size = 100;
     char *buf;
 
-    buf = (char *)gs_alloc_bytes(ctx->memory, size, "pdfi_mark_ctm_str(data)");
+    buf = (char *)gs_alloc_bytes(ctx->memory, size, "pdfi_pdfmark_ctm_str(data)");
     if (buf == NULL)
         return_error(gs_error_VMerror);
     snprintf(buf, size, "[%.4f %.4f %.4f %.4f %.4f %.4f]",
@@ -85,7 +87,7 @@ static int pdfi_mark_ctm_str(pdf_context *ctx, gs_matrix *ctm, byte **data, int 
 }
 
 /* Write an string array command to the device (e.g. pdfmark) */
-static int pdfi_mark_write_array(pdf_context *ctx, gs_param_string_array *array_list, const char *command)
+static int pdfi_pdfmark_write_array(pdf_context *ctx, gs_param_string_array *array_list, const char *command)
 {
     gs_c_param_list list;
     int code;
@@ -117,7 +119,7 @@ static int pdfi_mark_write_array(pdf_context *ctx, gs_param_string_array *array_
 }
 
 /* Write an string array command to the device (e.g. pdfmark) */
-static int pdfi_mark_write_string(pdf_context *ctx, gs_param_string *param_string, const char *command)
+static int pdfi_pdfmark_write_string(pdf_context *ctx, gs_param_string *param_string, const char *command)
 {
     gs_c_param_list list;
     int code;
@@ -162,7 +164,7 @@ static int pdfi_mark_write_string(pdf_context *ctx, gs_param_string *param_strin
 
    See plparams.c/process_pdfmark()
 */
-static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *label,
+static int pdfi_pdfmark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *label,
                                          pdf_dict *dict, gs_matrix *ctm, const char *type)
 {
     int code = 0;
@@ -193,7 +195,7 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
         size += 1;
 
     parray = (gs_param_string *)gs_alloc_bytes(ctx->memory, size*sizeof(gs_param_string),
-                                               "pdfi_mark_from_dict(parray)");
+                                               "pdfi_pdfmark_from_dict(parray)");
     if (parray == NULL) {
         code = gs_note_error(gs_error_VMerror);
         goto exit;
@@ -201,7 +203,7 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
     memset(parray, 0, size*sizeof(gs_param_string));
 
     if (label) {
-        code = pdfi_mark_setparam_obj(ctx, (pdf_obj *)label, parray+0);
+        code = pdfi_pdfmark_setparam_obj(ctx, (pdf_obj *)label, parray+0);
         offset += 1;
     }
 
@@ -212,7 +214,7 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
             code = pdfi_dict_get_no_deref(ctx, dict, Key, &Value);
             if (code < 0) goto exit;
 
-            code = pdfi_mark_setparam_pair(ctx, Key, Value, parray+offset+(keynum*2));
+            code = pdfi_pdfmark_setparam_pair(ctx, Key, Value, parray+offset+(keynum*2));
             if (code < 0) goto exit;
 
             pdfi_countdown(Key);
@@ -233,7 +235,7 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
     if (code < 0) goto exit;
 
     /* CTM */
-    code = pdfi_mark_ctm_str(ctx, ctm, &ctm_data, &ctm_len);
+    code = pdfi_pdfmark_ctm_str(ctx, ctm, &ctm_data, &ctm_len);
     if (code < 0) goto exit;
     parray[size-2].data = ctm_data;
     parray[size-2].size = ctm_len;
@@ -246,7 +248,7 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
     array_list.persistent = false;
     array_list.size = size;
 
-    code = pdfi_mark_write_array(ctx, &array_list, "pdfmark");
+    code = pdfi_pdfmark_write_array(ctx, &array_list, "pdfmark");
 
  exit:
     pdfi_countdown(Key);
@@ -256,25 +258,25 @@ static int pdfi_mark_from_dict_withlabel(pdf_context *ctx, pdf_indirect_ref *lab
         /* Free the param data except the last two which are handled separately */
         for (i=0; i<size-2; i++) {
             if (parray[i].data)
-                gs_free_object(ctx->memory, (byte *)parray[i].data, "pdfi_mark_from_dict(parray)");
+                gs_free_object(ctx->memory, (byte *)parray[i].data, "pdfi_pdfmark_from_dict(parray)");
         }
     }
     if (ctm_data)
-        gs_free_object(ctx->memory, ctm_data, "pdfi_mark_from_dict(ctm_data)");
-    gs_free_object(ctx->memory, parray, "pdfi_mark_from_dict(parray)");
+        gs_free_object(ctx->memory, ctm_data, "pdfi_pdfmark_from_dict(ctm_data)");
+    gs_free_object(ctx->memory, parray, "pdfi_pdfmark_from_dict(parray)");
     return code;
 }
 
 /* Do a pdfmark from a dictionary */
-int pdfi_mark_from_dict(pdf_context *ctx, pdf_dict *dict, gs_matrix *ctm, const char *type)
+int pdfi_pdfmark_from_dict(pdf_context *ctx, pdf_dict *dict, gs_matrix *ctm, const char *type)
 {
-    return pdfi_mark_from_dict_withlabel(ctx, NULL, dict, ctm, type);
+    return pdfi_pdfmark_from_dict_withlabel(ctx, NULL, dict, ctm, type);
 }
 
 /* Does a pdfmark, from a c-array of pdf_obj's
  * This will put in a dummy ctm if none provided
  */
-int pdfi_mark_from_objarray(pdf_context *ctx, pdf_obj **objarray, int len,
+int pdfi_pdfmark_from_objarray(pdf_context *ctx, pdf_obj **objarray, int len,
                             gs_matrix *ctm, const char *type)
 {
     int code = 0;
@@ -295,7 +297,7 @@ int pdfi_mark_from_objarray(pdf_context *ctx, pdf_obj **objarray, int len,
     size = len + 2; /* data + CTM + type */
 
     parray = (gs_param_string *)gs_alloc_bytes(ctx->memory, size*sizeof(gs_param_string),
-                                               "pdfi_mark_from_objarray(parray)");
+                                               "pdfi_pdfmark_from_objarray(parray)");
     if (parray == NULL) {
         code = gs_note_error(gs_error_VMerror);
         goto exit;
@@ -303,12 +305,12 @@ int pdfi_mark_from_objarray(pdf_context *ctx, pdf_obj **objarray, int len,
     memset(parray, 0, size *sizeof(gs_param_string));
 
     for (i=0; i<len; i++) {
-        code = pdfi_mark_setparam_obj(ctx, objarray[i], parray+i);
+        code = pdfi_pdfmark_setparam_obj(ctx, objarray[i], parray+i);
         if (code < 0) goto exit;
     }
 
     /* CTM */
-    code = pdfi_mark_ctm_str(ctx, ctm, &ctm_data, &ctm_len);
+    code = pdfi_pdfmark_ctm_str(ctx, ctm, &ctm_data, &ctm_len);
     if (code < 0) goto exit;
     parray[len].data = ctm_data;
     parray[len].size = ctm_len;
@@ -321,24 +323,24 @@ int pdfi_mark_from_objarray(pdf_context *ctx, pdf_obj **objarray, int len,
     array_list.persistent = false;
     array_list.size = size;
 
-    code = pdfi_mark_write_array(ctx, &array_list, "pdfmark");
+    code = pdfi_pdfmark_write_array(ctx, &array_list, "pdfmark");
 
  exit:
     if (parray != NULL) {
         for (i=0; i<len; i++) {
-            gs_free_object(ctx->memory, (byte *)parray[i].data, "pdfi_mark_from_objarray(parray)");
+            gs_free_object(ctx->memory, (byte *)parray[i].data, "pdfi_pdfmark_from_objarray(parray)");
         }
     }
     if (ctm_data)
-        gs_free_object(ctx->memory, ctm_data, "pdfi_mark_from_objarray(ctm_data)");
-    gs_free_object(ctx->memory, parray, "pdfi_mark_from_objarray(parray)");
+        gs_free_object(ctx->memory, ctm_data, "pdfi_pdfmark_from_objarray(ctm_data)");
+    gs_free_object(ctx->memory, parray, "pdfi_pdfmark_from_objarray(parray)");
     return code;
 }
 
 /* Send an arbitrary object as a string, with command 'cmd'
  * This is not a pdfmark, has no ctm.
  */
-int pdfi_mark_object(pdf_context *ctx, pdf_obj *object, const char *cmd)
+int pdfi_pdfmark_object(pdf_context *ctx, pdf_obj *object, const char *cmd)
 {
     gs_param_string param_string;
     int code = 0;
@@ -348,27 +350,21 @@ int pdfi_mark_object(pdf_context *ctx, pdf_obj *object, const char *cmd)
     code = pdfi_loop_detector_mark(ctx);
     if (code < 0)
         goto exit;
-    if (object->object_num != 0) {
-        code = pdfi_loop_detector_add_object(ctx, object->object_num);
-        if (code < 0) {
-            (void)pdfi_loop_detector_cleartomark(ctx);
-            goto exit;
-        }
-    }
-    code = pdfi_resolve_indirect(ctx, object, true);
+
+    code = pdfi_resolve_indirect_loop_detect(ctx, NULL, object, true);
     (void)pdfi_loop_detector_cleartomark(ctx);
     if (code < 0)
         goto exit;
 
-    code = pdfi_mark_setparam_obj(ctx, object, &param_string);
+    code = pdfi_pdfmark_setparam_obj(ctx, object, &param_string);
     if (code < 0)
         goto exit;
 
-    code = pdfi_mark_write_string(ctx, &param_string, cmd);
+    code = pdfi_pdfmark_write_string(ctx, &param_string, cmd);
 
 exit:
     if (param_string.data != NULL)
-        gs_free_object(ctx->memory, (byte *)param_string.data, "free data transferred to param_string in pdfi_mark_object\n");
+        gs_free_object(ctx->memory, (byte *)param_string.data, "free data transferred to param_string in pdfi_pdfmark_object\n");
     return code;
 }
 
@@ -380,7 +376,7 @@ exit:
  * Removes /Dest and inserts two key pairs: /Page N and /View <view_info>
  * N is the page number, which starts at 1, not 0.
  */
-static int pdfi_mark_add_Page_View(pdf_context *ctx, pdf_dict *link_dict, pdf_array *dest_array)
+static int pdfi_pdfmark_add_Page_View(pdf_context *ctx, pdf_dict *link_dict, pdf_array *dest_array)
 {
     int code = 0;
     int i;
@@ -397,19 +393,50 @@ static int pdfi_mark_add_Page_View(pdf_context *ctx, pdf_dict *link_dict, pdf_ar
     code = pdfi_array_get_no_store_R(ctx, dest_array, 0, (pdf_obj **)&page_dict);
     if (code < 0) goto exit;
 
-    if (page_dict->type != PDF_DICT) {
+    if(pdfi_type_of(page_dict) == PDF_INT) {
+        page_num = ((pdf_num *)page_dict)->value.i;
+    } else {
+        if (pdfi_type_of(page_dict) != PDF_DICT) {
+            if (pdfi_type_of(page_dict) != PDF_NULL) {
+                code = gs_note_error(gs_error_typecheck);
+                goto exit;
+            }
+            page_num = 0;
+        } else {
+            /* Find out which page number this is */
+            code = pdfi_page_get_number(ctx, page_dict, &page_num);
+            if (code < 0) goto exit;
+        }
+    }
+
+    page_num += ctx->Pdfmark_InitialPage;
+
+    if (pdfi_type_of(page_dict) != PDF_NULL)
+        /* Add /Page key to the link_dict
+         * Of course pdfwrite is numbering its pages starting at 1, because... of course :(
+         */
+        code = pdfi_dict_put_int(ctx, link_dict, "Page", page_num+1);
+    else
+        code = pdfi_dict_put_int(ctx, link_dict, "Page", 0);
+
+    if (code < 0)
+        goto exit;
+
+    /* Get and check the destination type, again without storing the deref in the array.
+     * In this case a memory leak  can only happen if the destination
+     * is an invalid type, but lets take no chances.
+     */
+    code = pdfi_array_get_no_store_R(ctx, dest_array, 1, &temp_obj);
+    if (code < 0) goto exit;
+
+    if (pdfi_type_of(temp_obj) != PDF_NAME) {
+        pdfi_countdown(temp_obj);
+        temp_obj = NULL;
         code = gs_note_error(gs_error_typecheck);
         goto exit;
     }
-
-    /* Find out which page number this is */
-    code = pdfi_page_get_number(ctx, page_dict, &page_num);
-    if (code < 0) goto exit;
-
-    /* Add /Page key to the link_dict
-     * Of course pdfwrite is numbering its pages starting at 1, because... of course :(
-     */
-    code = pdfi_dict_put_int(ctx, link_dict, "Page", page_num+1);
+    pdfi_countdown(temp_obj);
+    temp_obj = NULL;
 
     /* Build an array for /View, out of the remainder of the Dest entry */
     array_size = pdfi_array_size(dest_array) - 1;
@@ -437,7 +464,7 @@ static int pdfi_mark_add_Page_View(pdf_context *ctx, pdf_dict *link_dict, pdf_ar
 }
 
 /* Lookup a Dest string(or name) in the Names array and try to resolve it */
-static int pdfi_mark_handle_dest_names(pdf_context *ctx, pdf_dict *link_dict,
+static int pdfi_pdfmark_handle_dest_names(pdf_context *ctx, pdf_dict *link_dict,
                                          pdf_obj *dest, pdf_array *Names)
 {
     int code = 0;
@@ -463,12 +490,12 @@ static int pdfi_mark_handle_dest_names(pdf_context *ctx, pdf_dict *link_dict,
         /* Note: in current implementation, PDF_STRING and PDF_NAME have all the same
          * fields, but just in case that changes I treat them separately here.
          */
-        if (name->type == PDF_STRING && dest->type == PDF_STRING) {
+        if (pdfi_type_of(name) == PDF_STRING && pdfi_type_of(dest) == PDF_STRING) {
             if (!pdfi_string_cmp((pdf_string *)name, (pdf_string *)dest)) {
                 found = true;
                 break;
             }
-        } else if (name->type == PDF_NAME && dest->type == PDF_NAME) {
+        } else if (pdfi_type_of(name) == PDF_NAME && pdfi_type_of(dest) == PDF_NAME) {
             if (!pdfi_name_cmp((pdf_name *)name, (pdf_name *)dest)) {
                 found = true;
                 break;
@@ -488,22 +515,23 @@ static int pdfi_mark_handle_dest_names(pdf_context *ctx, pdf_dict *link_dict,
     code = pdfi_array_get(ctx, Names, i+1, (pdf_obj **)&D_dict);
     if (code < 0) goto exit;
 
-    if (D_dict->type == PDF_DICT) {
-        /* Dict is supposed to contain key "D" with Dest array */
-        code = pdfi_dict_knownget_type(ctx, D_dict, "D", PDF_ARRAY, (pdf_obj **)&dest_array);
-        if (code <= 0) goto exit;
-    } else {
-        if (D_dict->type == PDF_ARRAY) {
+    switch (pdfi_type_of(D_dict)) {
+        case PDF_DICT:
+            /* Dict is supposed to contain key "D" with Dest array */
+            code = pdfi_dict_knownget_type(ctx, D_dict, "D", PDF_ARRAY, (pdf_obj **)&dest_array);
+            if (code <= 0) goto exit;
+            break;
+        case PDF_ARRAY:
             dest_array = (pdf_array *)D_dict;
             D_dict = NULL;
-        } else {
+            break;
+        default:
             code = gs_note_error(gs_error_typecheck);
             goto exit;
-        }
     }
 
     /* Process the dest_array to replace with /Page /View */
-    code = pdfi_mark_add_Page_View(ctx, link_dict, dest_array);
+    code = pdfi_pdfmark_add_Page_View(ctx, link_dict, dest_array);
     if (code < 0) goto exit;
 
  exit:
@@ -516,9 +544,9 @@ static int pdfi_mark_handle_dest_names(pdf_context *ctx, pdf_dict *link_dict,
 /* Special handling for "Dest" in Links
  * Will replace /Dest with /Page /View in link_dict (for pdfwrite)
  */
-int pdfi_mark_modDest(pdf_context *ctx, pdf_dict *link_dict)
+int pdfi_pdfmark_modDest(pdf_context *ctx, pdf_dict *link_dict)
 {
-    int code = 0;
+    int code = 0, code1 = 0;
     pdf_dict *Dests = NULL;
     pdf_obj *Dest = NULL;
     bool delete_Dest = true;
@@ -535,14 +563,13 @@ int pdfi_mark_modDest(pdf_context *ctx, pdf_dict *link_dict)
     code = pdfi_dict_knownget_type(ctx, ctx->Root, "Names", PDF_DICT, (pdf_obj **)&Names_dict);
     if (code < 0) goto exit;
 
-    switch (Dest->type) {
+    switch (pdfi_type_of(Dest)) {
     case PDF_ARRAY:
-        code = pdfi_mark_add_Page_View(ctx, link_dict, (pdf_array *)Dest);
+        code = pdfi_pdfmark_add_Page_View(ctx, link_dict, (pdf_array *)Dest);
         if (code < 0) goto exit;
         break;
     case PDF_NAME:
-    case PDF_STRING:
-        if (Dest->type == PDF_NAME && Dests != NULL) {
+        if (Dests != NULL) {
             /* Case where it's a name to look up in Contents(Root) /Dests */
             code = pdfi_dict_get_by_key(ctx, Dests, (const pdf_name *)Dest, (pdf_obj **)&dest_array);
             if (code == gs_error_undefined) {
@@ -551,28 +578,51 @@ int pdfi_mark_modDest(pdf_context *ctx, pdf_dict *link_dict)
                 goto exit;
             }
             if (code < 0) goto exit;
-            if (dest_array->type != PDF_ARRAY) {
+            if (pdfi_type_of(dest_array) != PDF_ARRAY) {
                 code = gs_note_error(gs_error_typecheck);
                 goto exit;
             }
-            code = pdfi_mark_add_Page_View(ctx, link_dict, dest_array);
+            code = pdfi_pdfmark_add_Page_View(ctx, link_dict, dest_array);
             if (code < 0) goto exit;
-        } else if (Names_dict != NULL) {
+            break;
+        }
+        /* fallthrough */
+    case PDF_STRING:
+        if (Names_dict != NULL) {
             /* Looking in Catalog(Root) for /Names<</Dests<</Names [name dict array]>>>> */
             code = pdfi_dict_knownget_type(ctx, Names_dict, "Dests", PDF_DICT, (pdf_obj **)&Dests);
             if (code < 0) goto exit;
             if (code == 0) {
                 /* TODO: Not found -- not sure if there is another case here or not */
+                code = gs_note_error(gs_error_undefined);
                 goto exit;
             }
 
             code = pdfi_dict_knownget_type(ctx, Dests, "Names", PDF_ARRAY, (pdf_obj **)&Names);
             if (code < 0) goto exit;
             if (code == 0) {
-                /* TODO: Not found -- not sure if there is another case here or not */
-                goto exit;
-            }
-            code = pdfi_mark_handle_dest_names(ctx, link_dict, Dest, Names);
+                code = pdfi_get_named_dest(ctx, Dest, (pdf_obj **)&dest_array);
+                if (code < 0)
+                    goto exit;
+                if (pdfi_type_of(dest_array) == PDF_DICT) {
+                    pdf_obj *D = NULL;
+                    /* Dict is supposed to contain key "D" with Dest array */
+                    code = pdfi_dict_knownget_type(ctx, (pdf_dict *)dest_array, "D", PDF_ARRAY, &D);
+                    if (code <= 0) goto exit;
+
+                    pdfi_countdown(dest_array);
+                    dest_array = (pdf_array *)D;
+                }
+                if (pdfi_type_of(dest_array) == PDF_ARRAY) {
+                    code = pdfi_pdfmark_add_Page_View(ctx, link_dict, dest_array);
+                    if (code < 0)
+                        goto exit;
+                } else {
+                    pdfi_set_error(ctx, 0, NULL, E_PDF_BAD_NAMED_DEST, "pdfi_pdfmark_modDest", NULL);
+                }
+                break;
+            } else
+                code = pdfi_pdfmark_handle_dest_names(ctx, link_dict, Dest, Names);
             if (code < 0) goto exit;
         } else {
             /* TODO: Ignore it -- flag a warning? */
@@ -586,8 +636,9 @@ int pdfi_mark_modDest(pdf_context *ctx, pdf_dict *link_dict)
  exit:
     if (delete_Dest) {
         /* Delete the Dest key */
-        code = pdfi_dict_delete(ctx, link_dict, "Dest");
-        if (code < 0) goto exit;
+        code1 = pdfi_dict_delete(ctx, link_dict, "Dest");
+        if (code1 < 0 && code >= 0)
+            code = code1;
     }
     pdfi_countdown(Dest);
     pdfi_countdown(Dests);
@@ -597,10 +648,248 @@ int pdfi_mark_modDest(pdf_context *ctx, pdf_dict *link_dict)
     return code;
 }
 
+static int pdfi_check_limits(pdf_context *ctx, pdf_dict *node, char *str, int len)
+{
+    int code = 0, min, i, len2 = 0;
+    pdf_array *Limits = NULL;
+    pdf_string *Str = NULL;
+    char *str2 = NULL;
+
+    code = pdfi_dict_get_type(ctx, node, "Limits", PDF_ARRAY, (pdf_obj **)&Limits);
+    if (code < 0)
+        goto error;
+
+    if (pdfi_array_size(Limits) != 2) {
+        /* Limits are not valid, just ignore them. The calling code will then check
+         * the Names array.
+         */
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_TREE_LIMITS, "pdfi_check_limits", 0);
+        goto error;
+    }
+
+    code = pdfi_array_get_type(ctx, Limits, 0, PDF_STRING, (pdf_obj **)&Str);
+    if (code < 0)
+        goto error;
+
+    if (pdfi_type_of(Str) == PDF_NAME) {
+        code = pdfi_string_from_name(ctx, (pdf_name *)Str, &str2, &len2);
+        if (code < 0)
+            return code;
+    } else {
+        len2 = ((pdf_string *)Str)->length;
+        str2 = (char *)gs_alloc_bytes(ctx->memory, len2 + 1, "pdfi_check_limits");
+        if (str2 == NULL) {
+            code = gs_note_error(gs_error_VMerror);
+            goto error;
+        }
+         memcpy(str2, ((pdf_string *)Str)->data, len2);
+         str2[len2] = 0;
+    }
+
+    pdfi_countdown(Str);
+    Str = NULL;
+
+    min = len;
+    if (len2 < min)
+        min = len2;
+
+    for (i=0;i< min;i++) {
+        if (str[i] < str2[i]) {
+            code = gs_note_error(gs_error_undefined);
+            goto error;
+        }
+        if (str[i] != str2[i])
+            break;
+    }
+    if (i > min && len2 < Str->length) {
+        code = gs_note_error(gs_error_undefined);
+        goto error;
+    }
+    gs_free_object(ctx->memory, str2, "pdfi_check_limits");
+    str2 = NULL;
+
+    code = pdfi_array_get_type(ctx, Limits, 1, PDF_STRING, (pdf_obj **)&Str);
+    if (code < 0)
+        goto error;
+
+    if (pdfi_type_of(Str) == PDF_NAME) {
+        code = pdfi_string_from_name(ctx, (pdf_name *)Str, &str2, &len2);
+        if (code < 0)
+            return code;
+    } else {
+        len2 = ((pdf_string *)Str)->length;
+        str2 = (char *)gs_alloc_bytes(ctx->memory, len2 + 1, "pdfi_check_limits");
+        if (str2 == NULL) {
+            code = gs_note_error(gs_error_VMerror);
+            goto error;
+        }
+         memcpy(str2, ((pdf_string *)Str)->data, len2);
+         str2[len2] = 0;
+    }
+
+    pdfi_countdown(Str);
+    Str = NULL;
+
+    min = len;
+    if (len2 < min)
+        min = len2;
+
+    for (i=0;i< min;i++) {
+        if (str[i] > str2[i]) {
+            code = gs_note_error(gs_error_undefined);
+            goto error;
+        }
+        if (str[i] != str2[i])
+            break;
+    }
+
+    if (i > min && len > len2)
+        code = gs_note_error(gs_error_undefined);
+
+error:
+    gs_free_object(ctx->memory, str2, "pdfi_check_limits");
+    pdfi_countdown(Str);
+    pdfi_countdown(Limits);
+    return code;
+}
+
+static int pdfi_get_name_from_node(pdf_context *ctx, pdf_dict *node, char *str, int len, pdf_obj **Name, bool is_root)
+{
+    int i = 0, code = 0;
+    pdf_string *StrKey = NULL;
+    pdf_array *NamesArray = NULL;
+    pdf_dict *Kid = NULL;
+    bool known;
+
+    code = pdfi_loop_detector_mark(ctx);
+    if (code < 0)
+        return code;
+
+    code = pdfi_dict_known(ctx, node, "Names", &known);
+    if (code < 0)
+        goto error;
+
+    if (known) {
+        code = pdfi_dict_known(ctx, node, "Limits", &known);
+        if (code < 0)
+            goto error;
+
+        if (!known) {
+            if (!is_root)
+                /* No Limits array (a required entry, except in the Root), so just assume that the
+                 * string is in this node and check all the Names anyway
+                 */
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_NO_TREE_LIMITS, "pdfi_get_name_from_node", 0);
+        } else {
+            code = pdfi_check_limits(ctx, node, str, len);
+            if (code < 0)
+                goto error;
+        }
+
+        code = pdfi_dict_get_type(ctx, node, "Names", PDF_ARRAY, (pdf_obj **)&NamesArray);
+        if (code < 0)
+            goto error;
+
+        if (pdfi_array_size(NamesArray) & 1)
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_NAMES_ARRAY_SIZE, "pdfi_get_name_from_node", 0);
+
+        for (i = 0;i < pdfi_array_size(NamesArray) / 2; i++) {
+            code = pdfi_array_get_type(ctx, NamesArray, i * 2, PDF_STRING, (pdf_obj **)&StrKey);
+            if (code < 0)
+                goto error;
+
+            if (StrKey->length == len && memcmp((const char *)StrKey->data, str, len) == 0) {
+                code = pdfi_array_get(ctx, NamesArray, (i * 2) + 1, (pdf_obj **)Name);
+                goto error;
+            }
+            pdfi_countdown(StrKey);
+            StrKey = NULL;
+        }
+        pdfi_countdown(NamesArray);
+        NamesArray = NULL;
+    }
+
+    /* Either no Names array (initial node) or not in array */
+    code = pdfi_dict_get_type(ctx, node, "Kids", PDF_ARRAY, (pdf_obj **)&NamesArray);
+    if (code < 0)
+        goto error;
+
+    for (i = 0;i < pdfi_array_size(NamesArray); i++) {
+        code = pdfi_array_get_type(ctx, NamesArray, i, PDF_DICT, (pdf_obj **)&Kid);
+        if (code < 0)
+            goto error;
+
+        code = pdfi_get_name_from_node(ctx, Kid, str, len, Name, false);
+        pdfi_countdown(Kid);
+        Kid = NULL;
+        if (code == 0)
+            break;
+
+        if (code < 0) {
+            if (code == gs_error_undefined)
+                continue;
+            goto error;
+        }
+    }
+
+error:
+    pdfi_countdown(Kid);
+    pdfi_countdown(StrKey);
+    pdfi_countdown(NamesArray);
+    (void)pdfi_loop_detector_cleartomark(ctx);
+    return code;
+}
+
+static int pdfi_get_named_dest(pdf_context *ctx, pdf_obj *Named, pdf_obj **Dest)
+{
+    int code = 0, len = 0;
+    pdf_dict *Names = NULL, *Dests = NULL;
+    char *str = NULL;
+
+    code = pdfi_loop_detector_mark(ctx);
+    if (code < 0)
+        return code;
+
+    code = pdfi_dict_get_type(ctx, ctx->Root, "Names", PDF_DICT, (pdf_obj **)&Names);
+    if (code < 0)
+        goto error;
+
+    code = pdfi_dict_get_type(ctx, Names, "Dests", PDF_DICT, (pdf_obj **)&Dests);
+    if (code < 0)
+        goto error;
+
+    if (pdfi_type_of(Named) == PDF_NAME) {
+        code = pdfi_string_from_name(ctx, (pdf_name *)Named, &str, &len);
+        if (code < 0)
+            return code;
+    } else {
+        len = ((pdf_string *)Named)->length;
+        str = (char *)gs_alloc_bytes(ctx->memory, len + 1, "pdfi_get_named_dest");
+        if (str == NULL) {
+            code = gs_note_error(gs_error_VMerror);
+            goto error;
+        }
+        memcpy(str, ((pdf_string *)Named)->data, len);
+        str[len] = 0;
+    }
+
+    code = pdfi_get_name_from_node(ctx, Dests, str, len, Dest, true);
+
+error:
+    if (pdfi_type_of(Named) == PDF_NAME)
+        (void)pdfi_free_string_from_name(ctx, str);
+    else
+        gs_free_object(ctx->memory, str, "pdfi_get_named_dest");
+    pdfi_countdown(Names);
+    pdfi_countdown(Dests);
+    pdfi_loop_detector_cleartomark(ctx);
+    return code;
+}
+
 /* Special handling for "A" in Link annotations and Outlines
  * Will delete A if handled and if A_key is provided.
  */
-int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
+int pdfi_pdfmark_modA(pdf_context *ctx, pdf_dict *dict)
 {
     int code = 0;
     pdf_dict *A_dict = NULL;
@@ -613,7 +902,7 @@ int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
     code = pdfi_dict_get_no_store_R(ctx, dict, "A", (pdf_obj **)&A_dict);
     if (code < 0) goto exit;
 
-    if (A_dict->type != PDF_DICT) {
+    if (pdfi_type_of(A_dict) != PDF_DICT) {
         /* Invalid AP, just delete it because I dunno what to do...
          * TODO: Should flag a warning here
          */
@@ -625,7 +914,7 @@ int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
     code = pdfi_dict_known(ctx, A_dict, "URI", &known);
     if (code < 0) goto exit;
     if (known) {
-        code = pdfi_resolve_indirect_loop_detect(ctx, (pdf_obj *)NULL, (pdf_obj *)dict, true);
+        code = pdfi_resolve_indirect_loop_detect(ctx, (pdf_obj *)NULL, (pdf_obj *)A_dict, true);
         goto exit;
     }
 
@@ -637,21 +926,38 @@ int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
     if (code <= 0) goto exit;
     /* We only handle GoTo for now */
     if (pdfi_name_is(S_name, "GoTo")) {
-        code = pdfi_dict_knownget_type(ctx, A_dict, "D", PDF_ARRAY, (pdf_obj **)&D_array);
-        if (code == 0) goto exit;
-        if (code < 0) {
-            if (code == gs_error_typecheck) {
-                /* TODO: Are there other cases to handle?
-                 * Sample tests_private/pdf/sumatra/recursive_action_destinations.pdf
-                 * has a recursive destination that has an indirect ref here.  We return a
-                 * typecheck and that causes us to omit the whole thing, but is that
-                 * really the best treatment?
-                 */
-            }
+        code = pdfi_dict_knownget(ctx, A_dict, "D", (pdf_obj **)&D_array);
+        if (code <= 0)
+            goto exit;
+        if (pdfi_type_of(D_array) == PDF_STRING || pdfi_type_of(D_array) == PDF_NAME)
+        {
+            pdf_obj *Dest = NULL;
+
+            code = pdfi_get_named_dest(ctx, (pdf_obj *)D_array, &Dest);
+            if (code < 0)
+                goto exit;
+            pdfi_countdown(D_array);
+            D_array = NULL;
+            if (pdfi_type_of(Dest) != PDF_ARRAY) {
+                if (pdfi_type_of(Dest) != PDF_DICT) {
+                    pdfi_countdown(Dest);
+                    code = gs_note_error(gs_error_typecheck);
+                    goto exit;
+                }
+                code = pdfi_dict_knownget(ctx, (pdf_dict *)Dest, "D", (pdf_obj **)&D_array);
+                pdfi_countdown(Dest);
+                if (code <= 0)
+                    goto exit;
+            } else
+                D_array = (pdf_array *)Dest;
+        }
+        if (pdfi_type_of(D_array) != PDF_ARRAY) {
+            code = gs_note_error(gs_error_typecheck);
             goto exit;
         }
+
         /* Process the D array to replace with /Page /View */
-        code = pdfi_mark_add_Page_View(ctx, dict, D_array);
+        code = pdfi_pdfmark_add_Page_View(ctx, dict, D_array);
         if (code < 0) goto exit;
         delete_A = true;
     } else if (pdfi_name_is(S_name, "GoToR") || pdfi_name_is(S_name, "Launch")) {
@@ -718,7 +1024,6 @@ int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
     } else if (deref_A) {
         pdfi_countdown(A_dict);
         A_dict = NULL;
-        code = pdfi_dict_get(ctx, dict, "A", (pdf_obj **)&A_dict);
     }
     pdfi_countdown(A_dict);
     pdfi_countdown(S_name);
@@ -730,7 +1035,7 @@ int pdfi_mark_modA(pdf_context *ctx, pdf_dict *dict)
  * Send an OBJ (_objdef) command
  * (_objdef) (<label>) (/type) (/<type>) OBJ
  */
-static int pdfi_mark_objdef_begin(pdf_context *ctx, pdf_indirect_ref *label, const char *type)
+static int pdfi_pdfmark_objdef_begin(pdf_context *ctx, pdf_indirect_ref *label, const char *type)
 {
     int code;
     pdf_obj *objarray[4];
@@ -751,7 +1056,7 @@ static int pdfi_mark_objdef_begin(pdf_context *ctx, pdf_indirect_ref *label, con
     code = pdfi_obj_charstr_to_name(ctx, type, (pdf_name **)&objarray[3]);
     if (code < 0) goto exit;
 
-    code = pdfi_mark_from_objarray(ctx, objarray, num_objects, NULL, "OBJ");
+    code = pdfi_pdfmark_from_objarray(ctx, objarray, num_objects, NULL, "OBJ");
     if (code < 0) goto exit;
 
  exit:
@@ -764,7 +1069,7 @@ static int pdfi_mark_objdef_begin(pdf_context *ctx, pdf_indirect_ref *label, con
  * Send a CLOSE command
  * (<label>) CLOSE
  */
-static int pdfi_mark_objdef_close(pdf_context *ctx, pdf_indirect_ref *label)
+static int pdfi_pdfmark_objdef_close(pdf_context *ctx, pdf_indirect_ref *label)
 {
     int code;
     pdf_obj *objarray[1];
@@ -776,7 +1081,7 @@ static int pdfi_mark_objdef_close(pdf_context *ctx, pdf_indirect_ref *label)
     objarray[0] = (pdf_obj *)label;
     pdfi_countup(label);
 
-    code = pdfi_mark_from_objarray(ctx, objarray, num_objects, NULL, "CLOSE");
+    code = pdfi_pdfmark_from_objarray(ctx, objarray, num_objects, NULL, "CLOSE");
     if (code < 0) goto exit;
 
  exit:
@@ -785,7 +1090,7 @@ static int pdfi_mark_objdef_close(pdf_context *ctx, pdf_indirect_ref *label)
     return code;
 }
 
-static int pdfi_mark_stream_contents(pdf_context *ctx, pdf_indirect_ref *label, pdf_stream *stream)
+static int pdfi_pdfmark_stream_contents(pdf_context *ctx, pdf_indirect_ref *label, pdf_stream *stream)
 {
     int code;
     pdf_obj *objarray[2];
@@ -799,7 +1104,7 @@ static int pdfi_mark_stream_contents(pdf_context *ctx, pdf_indirect_ref *label, 
     pdfi_countup(stream);
     stream->is_marking = true;
 
-    code = pdfi_mark_from_objarray(ctx, objarray, num_objects, NULL, ".PUTSTREAM");
+    code = pdfi_pdfmark_from_objarray(ctx, objarray, num_objects, NULL, ".PUTSTREAM");
     if (code < 0) goto exit;
 
  exit:
@@ -810,7 +1115,7 @@ static int pdfi_mark_stream_contents(pdf_context *ctx, pdf_indirect_ref *label, 
 }
 
 /* Mark a stream object */
-int pdfi_mark_stream(pdf_context *ctx, pdf_stream *stream)
+int pdfi_pdfmark_stream(pdf_context *ctx, pdf_stream *stream)
 {
     int code;
     pdf_dict *streamdict = NULL;
@@ -863,16 +1168,16 @@ int pdfi_mark_stream(pdf_context *ctx, pdf_stream *stream)
     }
     if (code < 0) goto exit;
 
-    code = pdfi_mark_objdef_begin(ctx, streamref, "stream");
+    code = pdfi_pdfmark_objdef_begin(ctx, streamref, "stream");
     if (code < 0) goto exit;
 
-    code = pdfi_mark_from_dict_withlabel(ctx, streamref, tempdict, NULL, ".PUTDICT");
+    code = pdfi_pdfmark_from_dict_withlabel(ctx, streamref, tempdict, NULL, ".PUTDICT");
     if (code < 0) goto exit;
 
-    code = pdfi_mark_stream_contents(ctx, streamref, stream);
+    code = pdfi_pdfmark_stream_contents(ctx, streamref, stream);
     if (code < 0) goto exit;
 
-    code = pdfi_mark_objdef_close(ctx, streamref);
+    code = pdfi_pdfmark_objdef_close(ctx, streamref);
     if (code < 0) goto exit;
 
  exit:
@@ -882,7 +1187,7 @@ int pdfi_mark_stream(pdf_context *ctx, pdf_stream *stream)
 }
 
 /* Mark a dict object */
-int pdfi_mark_dict(pdf_context *ctx, pdf_dict *dict)
+int pdfi_pdfmark_dict(pdf_context *ctx, pdf_dict *dict)
 {
     int code;
     pdf_indirect_ref *dictref = NULL;
@@ -903,10 +1208,10 @@ int pdfi_mark_dict(pdf_context *ctx, pdf_dict *dict)
     dictref->ref_generation_num = dict->generation_num;
     dictref->is_marking = true;
 
-    code = pdfi_mark_objdef_begin(ctx, dictref, "dict");
+    code = pdfi_pdfmark_objdef_begin(ctx, dictref, "dict");
     if (code < 0) goto exit;
 
-    code = pdfi_mark_from_dict_withlabel(ctx, dictref, dict, NULL, ".PUTDICT");
+    code = pdfi_pdfmark_from_dict_withlabel(ctx, dictref, dict, NULL, ".PUTDICT");
     if (code < 0) goto exit;
 
  exit:
@@ -914,7 +1219,7 @@ int pdfi_mark_dict(pdf_context *ctx, pdf_dict *dict)
     return code;
 }
 
-static int pdfi_mark_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *filespec)
+static int pdfi_pdfmark_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *filespec)
 {
     int code;
     pdf_dict *tempdict = NULL;
@@ -933,7 +1238,7 @@ static int pdfi_mark_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *file
     code = pdfi_dict_put(ctx, tempdict, "FS", (pdf_obj *)filespec);
     if (code < 0) goto exit;
 
-    code = pdfi_mark_from_dict(ctx, tempdict, NULL, "EMBED");
+    code = pdfi_pdfmark_from_dict(ctx, tempdict, NULL, "EMBED");
     if (code < 0) goto exit;
 
  exit:
@@ -942,11 +1247,11 @@ static int pdfi_mark_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *file
 }
 
 /* embed a file */
-int pdfi_mark_embed_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *filespec)
+int pdfi_pdfmark_embed_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *filespec)
 {
     int code;
 
-    code = pdfi_mark_filespec(ctx, name, filespec);
+    code = pdfi_pdfmark_filespec(ctx, name, filespec);
     if (code < 0) goto exit;
 
  exit:
@@ -957,7 +1262,7 @@ int pdfi_mark_embed_filespec(pdf_context *ctx, pdf_string *name, pdf_dict *files
  * Create and emit a /DOCINFO pdfmark for any and all of Title,
  * Author, Subject, Keywords and Creator
  */
-void pdfi_write_docinfo_pdfmark(pdf_context *ctx, pdf_dict *info_dict)
+void pdfi_pdfmark_write_docinfo(pdf_context *ctx, pdf_dict *info_dict)
 {
     int i, code = 0;
     pdf_dict *Info = NULL;
@@ -984,7 +1289,7 @@ void pdfi_write_docinfo_pdfmark(pdf_context *ctx, pdf_dict *info_dict)
         }
     }
 
-    code = pdfi_mark_from_dict(ctx, Info, NULL, "DOCINFO");
+    code = pdfi_pdfmark_from_dict(ctx, Info, NULL, "DOCINFO");
 exit:
     pdfi_countdown(Info);
     return;
@@ -1001,7 +1306,7 @@ exit:
  * to adjust the various Box entries (note this routine must be called
  * early!).
  */
-void pdfi_write_boxes_pdfmark(pdf_context *ctx, pdf_dict *page_dict)
+void pdfi_pdfmark_write_boxes(pdf_context *ctx, pdf_dict *page_dict)
 {
     int i, code = 0;
     pdf_dict *BoxDict = NULL;
@@ -1012,8 +1317,8 @@ void pdfi_write_boxes_pdfmark(pdf_context *ctx, pdf_dict *page_dict)
         "CropBox", "BleedBox", "TrimBox", "ArtBox"
     };
 
-    /* If the device doesn't support pdfmar, exit now */
-    if (!ctx->device_state.writepdfmarks)
+    /* If the device doesn't support pdfmark, or the device modifies the Page Size (making the other boxes unreliable) exit now */
+    if (!ctx->device_state.writepdfmarks || ctx->device_state.ModifiesPageSize)
         return;
 
     /* If we are using somethign other than the MediaBox, don't send these */
@@ -1050,7 +1355,7 @@ void pdfi_write_boxes_pdfmark(pdf_context *ctx, pdf_dict *page_dict)
             pdf_array *new_array = NULL;
 
             /* Box is present in page dicitonayr, check it's an array */
-            if (o->type != PDF_ARRAY) {
+            if (pdfi_type_of(o) != PDF_ARRAY) {
                 pdfi_countdown(o);
                 continue;
             }
@@ -1081,7 +1386,7 @@ void pdfi_write_boxes_pdfmark(pdf_context *ctx, pdf_dict *page_dict)
     }
 
     /* Send all the Box entries to the device */
-    (void)pdfi_mark_from_dict(ctx, BoxDict, NULL, "PAGE");
+    (void)pdfi_pdfmark_from_dict(ctx, BoxDict, NULL, "PAGE");
 
 exit:
     pdfi_countdown(BoxDict);

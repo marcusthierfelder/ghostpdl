@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -307,6 +307,7 @@ zsetcolor(i_ctx_t * i_ctx_p)
         n_numeric_comps = n_comps;
 
     /* gather the numeric operands */
+    check_op(num_offset + n_numeric_comps);
     code = float_params(op - num_offset, n_numeric_comps, cc.paint.values);
     if (code < 0)
         return code;
@@ -4180,12 +4181,11 @@ static int setdevicenspace(i_ctx_t * i_ctx_p, ref *devicenspace, int *stage, int
                 return code;
             pcs->params.separation.sep_type = sep_type;
             pcs->params.separation.mem = imemory->non_gc_memory;
-            name_string_ref(imemory, &sname, &sname);
-            pcs->params.separation.sep_name = (char *)gs_alloc_bytes(pcs->params.separation.mem, r_size(&sname) + 1, "Separation name");
+            pcs->params.separation.sep_name = (char *)gs_alloc_bytes(pcs->params.separation.mem, r_size(&tname) + 1, "Separation name");
             if (pcs->params.separation.sep_name == NULL)
                 return_error(gs_error_VMerror);
-            memcpy(pcs->params.separation.sep_name, sname.value.bytes, r_size(&sname));
-            pcs->params.separation.sep_name[r_size(&sname)] = 0x00;
+            memcpy(pcs->params.separation.sep_name, tname.value.bytes, r_size(&tname));
+            pcs->params.separation.sep_name[r_size(&tname)] = 0x00;
             code = array_get(imemory, &namesarray, (long)0, &sname);
             if (code < 0)
                 return code;
@@ -4284,7 +4284,7 @@ static int validatedevicenspace(i_ctx_t * i_ctx_p, ref **space)
     if (r_size(&namesarray) < 1)
         return_error(gs_error_typecheck);
     /* Make sure no more inks than we can cope with */
-    if (r_size(&namesarray) > MAX_COMPONENTS_IN_DEVN)    /* MUST match psi/icremap.h int_remap_color_info_s */
+    if (r_size(&namesarray) > GS_CLIENT_COLOR_MAX_COMPONENTS)    /* MUST match psi/icremap.h int_remap_color_info_s */
         return_error(gs_error_limitcheck);
     /* Check the tint transform is a procedure */
     code = array_get(imemory, devicenspace, 3, &proc);
@@ -6422,6 +6422,7 @@ static int validate_spaces(i_ctx_t *i_ctx_p, ref *arr, int *depth)
 static int
 setcolor_cont(i_ctx_t *i_ctx_p)
 {
+    os_ptr  op = osp;
     ref arr, *parr = &arr;
     es_ptr ep = esp;
     int i=0, code = 0, usealternate, stage, stack_depth, CIESubst = 0, IsICC = 0;
@@ -6496,6 +6497,8 @@ setcolor_cont(i_ctx_t *i_ctx_p)
 
     /* Remove our next continuation and our data */
     obj->numcomponents(i_ctx_p, parr, &i);
+    /* This would be better done sooner, but we need the color space object first */
+    check_op(i);
     pop(i);
     esp -= 5;
     return o_pop_estack;

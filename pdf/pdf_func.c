@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* function creation for the PDF interpreter */
@@ -146,17 +146,26 @@ static int
 pdfi_parse_type4_func_stream(pdf_context *ctx, pdf_c_stream *function_stream, int depth, byte *ops, unsigned int *size)
 {
     int code;
-    byte c;
+    int c;
     char TokenBuffer[17];
     unsigned int Size, IsReal;
     byte *clause = NULL;
     byte *p = (ops ? ops + *size : NULL);
 
-    do {
-        code = pdfi_read_bytes(ctx, &c, 1, 1, function_stream);
-        if (code < 0)
+    while (1) {
+        c = pdfi_read_byte(ctx, function_stream);
+        if (c < 0)
             break;
         switch(c) {
+            case '%':
+                do {
+                    c = pdfi_read_byte(ctx, function_stream);
+                    if (c < 0)
+                        break;
+                    if (c == 0x0a || c == 0x0d)
+                        break;
+                }while (1);
+                break;
             case 0x20:
             case 0x0a:
             case 0x0d:
@@ -202,32 +211,30 @@ pdfi_parse_type4_func_stream(pdf_context *ctx, pdf_c_stream *function_stream, in
                         IsReal = 1;
                     else
                         IsReal = 0;
-                    TokenBuffer[0] = c;
-                    do {
-                        code = pdfi_read_bytes(ctx, &c, 1, 1, function_stream);
-                        if (code < 0)
-                            return code;
-                        if (code == 0)
+                    TokenBuffer[0] = (byte)c;
+                    while (1) {
+                        c = pdfi_read_byte(ctx, function_stream);
+                        if (c < 0)
                             return_error(gs_error_syntaxerror);
 
                         if (c == '.'){
                             if (IsReal == 1)
-                                code = gs_error_syntaxerror;
+                                return_error(gs_error_syntaxerror);
                             else {
-                                TokenBuffer[Size++] = c;
+                                TokenBuffer[Size++] = (byte)c;
                                 IsReal = 1;
                             }
                         } else {
                             if (c >= '0' && c <= '9') {
-                                TokenBuffer[Size++] = c;
+                                TokenBuffer[Size++] = (byte)c;
                             } else
                                 break;
                         }
                         if (Size > NUMBERTOKENSIZE)
                             return_error(gs_error_syntaxerror);
-                    } while (code >= 0);
+                    }
                     TokenBuffer[Size] = 0x00;
-                    pdfi_unread(ctx, function_stream, &c, 1);
+                    pdfi_unread_byte(ctx, function_stream, (byte)c);
                     if (IsReal == 1) {
                         *size += put_float(&p, atof(TokenBuffer));
                     } else {
@@ -239,21 +246,19 @@ pdfi_parse_type4_func_stream(pdf_context *ctx, pdf_c_stream *function_stream, in
 
                     /* parse an operator */
                     Size = 1;
-                    TokenBuffer[0] = c;
+                    TokenBuffer[0] = (byte)c;
                     while (1) {
-                        code = pdfi_read_bytes(ctx, &c, 1, 1, function_stream);
-                        if (code < 0)
-                            return code;
-                        if (code == 0)
+                        c = pdfi_read_byte(ctx, function_stream);
+                        if (c < 0)
                             return_error(gs_error_syntaxerror);
                         if (c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d || c == '{' || c == '}')
                             break;
-                        TokenBuffer[Size++] = c;
+                        TokenBuffer[Size++] = (byte)c;
                         if (Size > OPTOKENSIZE)
                             return_error(gs_error_syntaxerror);
                     }
                     TokenBuffer[Size] = 0x00;
-                    pdfi_unread(ctx, function_stream, &c, 1);
+                    pdfi_unread_byte(ctx, function_stream, (byte)c);
                     for (i=0;i < NumOps;i++) {
                         Op = (op_struct_t *)&ops_table[i];
                         if (Op->length < Size)
@@ -278,9 +283,9 @@ pdfi_parse_type4_func_stream(pdf_context *ctx, pdf_c_stream *function_stream, in
                 }
                 break;
         }
-    } while (code >= 0);
+    }
 
-    return code;
+    return 0;
 }
 
 static int
@@ -300,7 +305,7 @@ pdfi_build_function_4(pdf_context *ctx, gs_function_params_t * mnDR,
     params.ops.data = 0;	/* in case of failure */
     params.ops.size = 0;	/* ditto */
 
-    if (function_obj->type != PDF_STREAM)
+    if (pdfi_type_of(function_obj) != PDF_STREAM)
         return_error(gs_error_undefined);
     Length = pdfi_stream_length(ctx, (pdf_stream *)function_obj);
 
@@ -382,7 +387,7 @@ pdfi_build_function_0(pdf_context *ctx, gs_function_params_t * mnDR,
     params.Size = params.array_step = params.stream_step = NULL;
     params.Order = 0;
 
-    if (function_obj->type != PDF_STREAM)
+    if (pdfi_type_of(function_obj) != PDF_STREAM)
         return_error(gs_error_undefined);
 
     code = pdfi_dict_from_obj(ctx, (pdf_obj *)function_obj, &function_dict);
@@ -448,7 +453,7 @@ pdfi_build_function_0(pdf_context *ctx, gs_function_params_t * mnDR,
 
     code = pdfi_make_int_array_from_dict(ctx, (int **)&params.Size, function_dict, "Size");
     if (code != params.m) {
-        if (code > 0)
+        if (code >= 0)
             code = gs_error_rangecheck;
         goto function_0_error;
     }
@@ -564,19 +569,6 @@ pdfi_build_function_3(pdf_context *ctx, gs_function_params_t * mnDR,
 
     params.Functions = (const gs_function_t * const *)ptr;
 
-    for (i = 0; i < params.k; ++i) {
-        pdf_obj * rsubfn = NULL;
-
-        code = pdfi_array_get(ctx, (pdf_array *)Functions, (int64_t)i, &rsubfn);
-        if (code < 0)
-            goto function_3_error;
-
-        code = pdfi_build_sub_function(ctx, &ptr[i], shading_domain, num_inputs, rsubfn, page_dict);
-        pdfi_countdown(rsubfn);
-        if (code < 0)
-            goto function_3_error;
-    }
-
     code = pdfi_make_float_array_from_dict(ctx, (float **)&params.Bounds, function_dict, "Bounds");
     if (code < 0)
         goto function_3_error;
@@ -585,8 +577,35 @@ pdfi_build_function_3(pdf_context *ctx, gs_function_params_t * mnDR,
     if (code < 0)
         goto function_3_error;
 
-    if (code != 2 * params.k)
+    if (code != 2 * params.k) {
+        code = gs_note_error(gs_error_rangecheck);
         goto function_3_error;
+    }
+    code = 0;
+
+    for (i = 0; i < params.k; ++i) {
+        pdf_obj * rsubfn = NULL;
+
+        /* This is basically hacky. The test file /tests_private/pdf/pdf_1.7_ATS/WWTW61EC_file.pdf
+         * has a number of shadings on page 2. Although there are numerous shadings, they each use one
+         * of four functions. However, these functions are themselves type 3 functions with 255
+         * sub-functions. Because our cache only has 200 entries (at this moment), this overfills
+         * the cache, ejecting all the cached objects (and then some). Which means that we throw
+         * out any previous shadings or functions, meaning that on every use we have to reread them. This is,
+         * obviously, slow. So in the hope that reuse of *sub_functions* is unlikely, we choose to
+         * read the subfunction without caching. This means the main shadings, and the functions,
+         * remain cached so we can reuse them saving an enormous amount of time. If we ever find a file
+         * which significantly reuses sub-functions we may need to revisit this.
+         */
+        code = pdfi_array_get_nocache(ctx, (pdf_array *)Functions, (int64_t)i, &rsubfn);
+        if (code < 0)
+            goto function_3_error;
+
+        code = pdfi_build_sub_function(ctx, &ptr[i], &params.Encode[i * 2], num_inputs, rsubfn, page_dict);
+        pdfi_countdown(rsubfn);
+        if (code < 0)
+            goto function_3_error;
+    }
 
     if (params.Range == 0)
         params.n = params.Functions[0]->params.n;
@@ -612,6 +631,7 @@ static int pdfi_build_sub_function(pdf_context *ctx, gs_function_t ** ppfn, cons
     int64_t Type;
     gs_function_params_t params;
     pdf_dict *stream_dict;
+    int obj_num;
 
     params.Range = params.Domain = NULL;
 
@@ -619,10 +639,11 @@ static int pdfi_build_sub_function(pdf_context *ctx, gs_function_t ** ppfn, cons
     if (code < 0)
         return code;
 
-    if (stream_obj->object_num != 0) {
-        if (pdfi_loop_detector_check_object(ctx, stream_obj->object_num))
+    obj_num = pdf_object_num(stream_obj);
+    if (obj_num != 0) {
+        if (pdfi_loop_detector_check_object(ctx, obj_num))
             return gs_note_error(gs_error_circular_reference);
-        code = pdfi_loop_detector_add_object(ctx, stream_obj->object_num);
+        code = pdfi_loop_detector_add_object(ctx, obj_num);
         if (code < 0)
             goto sub_function_error;
     }

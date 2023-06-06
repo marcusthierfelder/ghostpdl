@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #include "ghostpdf.h"
@@ -23,6 +23,7 @@
 #include "pdf_deref.h" /* for replace_cache_entry() */
 #include "pdf_mark.h"
 #include "pdf_file.h" /* for pdfi_stream_to_buffer() */
+#include "pdf_loop_detect.h"
 
 /***********************************************************************************/
 /* Functions to create the various kinds of 'PDF objects', Created objects have a  */
@@ -35,12 +36,12 @@
 int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pdf_obj **obj)
 {
     int bytes = 0;
+    int code = 0;
 
     switch(type) {
         case PDF_ARRAY_MARK:
         case PDF_DICT_MARK:
         case PDF_PROC_MARK:
-        case PDF_NULL:
             bytes = sizeof(pdf_obj);
             break;
         case PDF_INT:
@@ -49,7 +50,10 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
             break;
         case PDF_STRING:
         case PDF_NAME:
-            bytes = sizeof(pdf_string);
+            bytes = sizeof(pdf_string) + size - PDF_NAME_DECLARED_LENGTH;
+            break;
+        case PDF_BUFFER:
+            bytes = sizeof(pdf_buffer);
             break;
         case PDF_ARRAY:
             bytes = sizeof(pdf_array);
@@ -60,11 +64,8 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
         case PDF_INDIRECT:
             bytes = sizeof(pdf_indirect_ref);
             break;
-        case PDF_BOOL:
-            bytes = sizeof(pdf_bool);
-            break;
         case PDF_KEYWORD:
-            bytes = sizeof(pdf_keyword);
+            bytes = sizeof(pdf_keyword) + size - PDF_NAME_DECLARED_LENGTH;
             break;
         /* The following aren't PDF object types, but are objects we either want to
          * reference count, or store on the stack.
@@ -75,23 +76,34 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
         case PDF_STREAM:
             bytes = sizeof(pdf_stream);
             break;
+        case PDF_NULL:
+        case PDF_BOOL:
         default:
-            return_error(gs_error_typecheck);
+            code = gs_note_error(gs_error_typecheck);
+            goto error_out;
     }
     *obj = (pdf_obj *)gs_alloc_bytes(ctx->memory, bytes, "pdfi_object_alloc");
-    if (*obj == NULL)
-        return_error(gs_error_VMerror);
+    if (*obj == NULL) {
+        code = gs_note_error(gs_error_VMerror);
+        goto error_out;
+    }
 
     memset(*obj, 0x00, bytes);
     (*obj)->ctx = ctx;
     (*obj)->type = type;
 
     switch(type) {
+/*      PDF_NULL and PDF_BOOL are now handled as special (not allocated) data types
+        and we will return an error in the switch above if we get a call to allocate
+        one of these. Having the cases isn't harmful but Coverity complains of dead
+        code, so commenting these out to silence Coverity while preserving the old
+        semantics to indicate what's happening.
         case PDF_NULL:
+        case PDF_BOOL: */
+
         case PDF_INT:
         case PDF_REAL:
         case PDF_INDIRECT:
-        case PDF_BOOL:
         case PDF_ARRAY_MARK:
         case PDF_DICT_MARK:
         case PDF_PROC_MARK:
@@ -99,16 +111,24 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
         case PDF_KEYWORD:
         case PDF_STRING:
         case PDF_NAME:
+            ((pdf_string *)*obj)->length = size;
+            break;
+        case PDF_BUFFER:
             {
-                unsigned char *data = NULL;
-                data = (unsigned char *)gs_alloc_bytes(ctx->memory, size, "pdfi_object_alloc");
-                if (data == NULL) {
-                    gs_free_object(ctx->memory, *obj, "pdfi_object_alloc");
-                    *obj = NULL;
-                    return_error(gs_error_VMerror);
+                pdf_buffer *b = (pdf_buffer *)*obj;
+               /* NOTE: size can be 0 if the caller wants to allocate the data area itself
+                */
+                if (size > 0) {
+                    b->data = gs_alloc_bytes(ctx->memory, size, "pdfi_object_alloc");
+                    if (b->data == NULL) {
+                        code = gs_note_error(gs_error_VMerror);
+                        goto error_out;
+                    }
                 }
-                ((pdf_string *)*obj)->data = data;
-                ((pdf_string *)*obj)->length = size;
+                else {
+                    b->data = NULL;
+                }
+                b->length = size;
             }
             break;
         case PDF_ARRAY:
@@ -119,10 +139,8 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
                 if (size > 0) {
                     values = (pdf_obj **)gs_alloc_bytes(ctx->memory, size * sizeof(pdf_obj *), "pdfi_object_alloc");
                     if (values == NULL) {
-                        gs_free_object(ctx->memory, *obj, "pdfi_object_alloc");
-                        gs_free_object(ctx->memory, values, "pdfi_object_alloc");
-                        *obj = NULL;
-                        return_error(gs_error_VMerror);
+                        code = gs_note_error(gs_error_VMerror);
+                        goto error_out;
                     }
                     ((pdf_array *)*obj)->values = values;
                     memset(((pdf_array *)*obj)->values, 0x00, size * sizeof(pdf_obj *));
@@ -131,23 +149,17 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
             break;
         case PDF_DICT:
             {
-                pdf_obj **keys = NULL, **values = NULL;
+                pdf_dict_entry *entries = NULL;
 
                 ((pdf_dict *)*obj)->size = size;
                 if (size > 0) {
-                    keys = (pdf_obj **)gs_alloc_bytes(ctx->memory, size * sizeof(pdf_obj *), "pdfi_object_alloc");
-                    values = (pdf_obj **)gs_alloc_bytes(ctx->memory, size * sizeof(pdf_obj *), "pdfi_object_alloc");
-                    if (keys == NULL || values == NULL) {
-                        gs_free_object(ctx->memory, *obj, "pdfi_object_alloc");
-                        gs_free_object(ctx->memory, keys, "pdfi_object_alloc");
-                        gs_free_object(ctx->memory, values, "pdfi_object_alloc");
-                        *obj = NULL;
-                        return_error(gs_error_VMerror);
+                    entries = (pdf_dict_entry *)gs_alloc_bytes(ctx->memory, size * sizeof(pdf_dict_entry), "pdfi_object_alloc");
+                    if (entries == NULL) {
+                        code = gs_note_error(gs_error_VMerror);
+                        goto error_out;
                     }
-                    ((pdf_dict *)*obj)->values = values;
-                    ((pdf_dict *)*obj)->keys = keys;
-                    memset(((pdf_dict *)*obj)->values, 0x00, size * sizeof(pdf_obj *));
-                    memset(((pdf_dict *)*obj)->keys, 0x00, size * sizeof(pdf_obj *));
+                    ((pdf_dict *)*obj)->list = entries;
+                    memset(((pdf_dict *)*obj)->list, 0x00, size * sizeof(pdf_dict_entry));
                 }
             }
             break;
@@ -164,6 +176,10 @@ int pdfi_object_alloc(pdf_context *ctx, pdf_obj_type type, unsigned int size, pd
     dmprintf2(ctx->memory, "Allocated object of type %c with UID %"PRIi64"\n", (*obj)->type, (*obj)->UID);
 #endif
     return 0;
+error_out:
+    gs_free_object(ctx->memory, *obj, "pdfi_object_alloc");
+    *obj = NULL;
+    return code;
 }
 
 /* Create a PDF number object from a numeric value. Attempts to create
@@ -205,18 +221,13 @@ static void pdfi_free_namestring(pdf_obj *o)
     /* Currently names and strings are the same, so a single cast is OK */
     pdf_name *n = (pdf_name *)o;
 
-    if (n->data != NULL)
-        gs_free_object(OBJ_MEMORY(n), n->data, "pdf interpreter free name or string data");
     gs_free_object(OBJ_MEMORY(n), n, "pdf interpreter free name or string");
 }
 
 static void pdfi_free_keyword(pdf_obj *o)
 {
-    /* Currently names and strings are the same, so a single cast is OK */
     pdf_keyword *k = (pdf_keyword *)o;
 
-    if (k->data != NULL)
-        gs_free_object(OBJ_MEMORY(k), k->data, "pdf interpreter free keyword data");
     gs_free_object(OBJ_MEMORY(k), k, "pdf interpreter free keyword");
 }
 
@@ -236,22 +247,35 @@ static void pdfi_free_stream(pdf_obj *o)
     gs_free_object(OBJ_MEMORY(o), o, "pdfi_free_stream");
 }
 
+static void pdfi_free_buffer(pdf_obj *o)
+{
+    pdf_buffer *b = (pdf_buffer *)o;
+
+    gs_free_object(OBJ_MEMORY(b), b->data, "pdfi_free_buffer(data)");
+    gs_free_object(OBJ_MEMORY(o), o, "pdfi_free_buffer");
+}
+
 void pdfi_free_object(pdf_obj *o)
 {
+    if (o == NULL)
+        return;
+    if ((intptr_t)o < (intptr_t)TOKEN__LAST_KEY)
+        return;
     switch(o->type) {
         case PDF_ARRAY_MARK:
         case PDF_DICT_MARK:
         case PDF_PROC_MARK:
-        case PDF_NULL:
         case PDF_INT:
         case PDF_REAL:
         case PDF_INDIRECT:
-        case PDF_BOOL:
             gs_free_object(OBJ_MEMORY(o), o, "pdf interpreter object refcount to 0");
             break;
         case PDF_STRING:
         case PDF_NAME:
             pdfi_free_namestring(o);
+            break;
+        case PDF_BUFFER:
+            pdfi_free_buffer(o);
             break;
         case PDF_ARRAY:
             pdfi_free_array(o);
@@ -274,8 +298,12 @@ void pdfi_free_object(pdf_obj *o)
         case PDF_CMAP:
             pdfi_free_cmap(o);
             break;
+        case PDF_BOOL:
+        case PDF_NULL:
+            dbgmprintf(OBJ_MEMORY(o), "!!! Attempting to free non-allocated object type !!!\n");
+            break;
         default:
-            dbgmprintf(OBJ_MEMORY(o), "!!! Attempting to free unknown obect type !!!\n");
+            dbgmprintf(OBJ_MEMORY(o), "!!! Attempting to free unknown object type !!!\n");
             break;
     }
 }
@@ -291,7 +319,7 @@ int pdfi_obj_dict_to_stream(pdf_context *ctx, pdf_dict *dict, pdf_stream **strea
     int code = 0;
     pdf_stream *new_stream = NULL;
 
-    if (dict->type != PDF_DICT)
+    if (pdfi_type_of(dict) != PDF_DICT)
         return_error(gs_error_typecheck);
 
     code = pdfi_object_alloc(ctx, PDF_STREAM, 0, (pdf_obj **)&new_stream);
@@ -319,6 +347,22 @@ int pdfi_obj_dict_to_stream(pdf_context *ctx, pdf_dict *dict, pdf_stream **strea
  error_exit:
     pdfi_countdown(new_stream);
     return code;
+}
+
+int pdfi_stream_to_dict(pdf_context *ctx, pdf_stream *stream, pdf_dict **dict)
+{
+    *dict = stream->stream_dict;
+
+    /* Make sure the dictionary won't go away */
+    pdfi_countup(*dict);
+    if ((*dict)->object_num == 0) {
+        (*dict)->object_num = stream->object_num;
+        (*dict)->generation_num = stream->generation_num;
+    }
+
+    /* This will countdown the dictionary */
+    pdfi_countdown(stream);
+    return 0;
 }
 
 /* Create a pdf_string from a c char * */
@@ -462,7 +506,7 @@ int pdfi_obj_get_label(pdf_context *ctx, pdf_obj *obj, char **label)
         goto exit;
     }
 
-    if (obj->type == PDF_INDIRECT)
+    if (pdfi_type_of(obj) == PDF_INDIRECT)
         snprintf(string, length, template, ref->ref_object_num, ref->ref_generation_num);
     else
         snprintf(string, length, template, obj->object_num, obj->generation_num);
@@ -573,7 +617,7 @@ static int pdfi_obj_indirect_str(pdf_context *ctx, pdf_obj *obj, byte **data, in
         ref->is_highlevelform = false;
     } else {
         if (!ref->is_marking) {
-            code = pdfi_dereference(ctx, ref->ref_object_num, ref->ref_generation_num, &object);
+            code = pdfi_deref_loop_detect(ctx, ref->ref_object_num, ref->ref_generation_num, &object);
             if (code == gs_error_undefined) {
                 /* Do something sensible for undefined reference (this would be a broken file) */
                 /* TODO: Flag an error? */
@@ -583,11 +627,11 @@ static int pdfi_obj_indirect_str(pdf_context *ctx, pdf_obj *obj, byte **data, in
             if (code < 0 && code != gs_error_circular_reference)
                 goto exit;
             if (code == 0) {
-                if (object->type == PDF_STREAM) {
-                    code = pdfi_mark_stream(ctx, (pdf_stream *)object);
+                if (pdfi_type_of(object) == PDF_STREAM) {
+                    code = pdfi_pdfmark_stream(ctx, (pdf_stream *)object);
                     if (code < 0) goto exit;
-                } else if (object->type == PDF_DICT) {
-                    code = pdfi_mark_dict(ctx, (pdf_dict *)object);
+                } else if (pdfi_type_of(object) == PDF_DICT) {
+                    code = pdfi_pdfmark_dict(ctx, (pdf_dict *)object);
                     if (code < 0) goto exit;
                 } else {
                     code = pdfi_obj_to_string(ctx, object, data, len);
@@ -613,13 +657,12 @@ static int pdfi_obj_bool_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *l
 {
     int code = 0;
     int size = 5;
-    pdf_bool *bool = (pdf_bool *)obj;
     char *buf;
 
     buf = (char *)gs_alloc_bytes(ctx->memory, size, "pdfi_obj_bool_str(data)");
     if (buf == NULL)
         return_error(gs_error_VMerror);
-    if (bool->value) {
+    if (obj == PDF_TRUE_OBJ) {
         memcpy(buf, (byte *)"true", 4);
         *len = 4;
     } else {
@@ -647,87 +690,58 @@ static int pdfi_obj_null_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *l
 
 static int pdfi_obj_string_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *len)
 {
-    int code = 0;
     pdf_string *string = (pdf_string *)obj;
-    int size;
-    int string_len;
     char *buf;
-    char *bufptr;
-    bool non_ascii = false;
-    int num_esc = 0;
-    int i;
-    byte *ptr;
+    int i, length = 0, j;
 
-    string_len = string->length;
-    /* See if there are any non-ascii chars */
-    for (i=0,ptr=string->data;i<string_len;i++,ptr++) {
-        /* TODO: I wanted to convert non-ascii to hex strings, but there
-         * are cases (such as /Author field) where the non-ascii is not really binary
-         * and then pdfwrite barfs on it later.
-         * see gdevpdfu.c/pdf_put_encoded_hex_string(), which is not implemented
-         * and causes crashes...
-         * See sample: tests_private/pdf/sumatra/1532_-_Freetype_crash.pdf
-         *
-         * For now, just disabling the generation of hex strings, which will match
-         * what gs does.  Seems lame.
-         */
-#if 0
-        if (*ptr > 127) {
-            non_ascii = true;
-            break;
-        }
-#endif
-        /* TODO: I was going to just turn special chars into hexstrings, but it turns out
-         * that the pdfwrite driver expects to be able to parse URI strings, and these
-         * can have special characters.  So I will handle the minimum that seems needed for that.
-         */
-        switch (*ptr) {
-        case '(':
-        case ')':
-        case '\\':
-            num_esc ++;
-            break;
-        default:
-            break;
+    for (j=0;j<string->length;j++) {
+        if (string->data[j] == 0x0a || string->data[j] == 0x0d || string->data[j] == '(' || string->data[j] == ')' || string->data[j] == '\\')
+                length += 2;
+        else {
+            if (string->data[j] < 0x20 || string->data[j] > 0x7F || string->data[j] == '\\')
+                length += 4;
+            else
+                length++;
         }
     }
-
-    if (non_ascii) {
-        size = string->length * 2 + 2;
-        buf = (char *)gs_alloc_bytes(ctx->memory, size, "pdfi_obj_string_str(data)");
-        if (buf == NULL)
-            return_error(gs_error_VMerror);
-        buf[0] = '<';
-        for (i=0,ptr=string->data;i<string_len;i++,ptr++) {
-            snprintf(buf+2*i+1, 3, "%02X", *ptr);
-        }
-        buf[size-1] = '>';
-    } else {
-        size = string->length + 2 + num_esc;
-        buf = (char *)gs_alloc_bytes(ctx->memory, size, "pdfi_obj_string_str(data)");
-        if (buf == NULL)
-            return_error(gs_error_VMerror);
-        buf[0] = '(';
-        bufptr = buf + 1;
-        for (i=0,ptr=string->data;i<string_len;i++) {
-            switch (*ptr) {
+    length += 2;
+    buf = (char *)gs_alloc_bytes(ctx->memory, length, "pdfi_obj_string_str(data)");
+    if (buf == NULL)
+        return_error(gs_error_VMerror);
+    buf[0] = '(';
+    i = 1;
+    for (j=0;j<string->length;j++) {
+        switch(string->data[j]) {
+            case 0x0a:
+                buf[i++] = '\\';
+                buf[i++] = 'n';
+                break;
+            case 0x0d:
+                buf[i++] = '\\';
+                buf[i++] = 'r';
+                break;
             case '(':
             case ')':
             case '\\':
-                *bufptr++ = '\\';
+                buf[i++] = '\\';
+                buf[i++] = string->data[j];
                 break;
             default:
+                if (string->data[j] < 0x20 || string->data[j] > 0x7F) {
+                    buf[i++] = '\\';
+                    buf[i++] = (string->data[j] >> 6) + 0x30;
+                    buf[i++] = ((string->data[j] & 0x3F) >> 3) + 0x30;
+                    buf[i++] = (string->data[j] & 0x07) + 0x30;
+                } else
+                buf[i++] = string->data[j];
                 break;
-            }
-            *bufptr++ = *ptr++;
         }
-        buf[size-1] = ')';
     }
+    buf[i++] = ')';
 
-
-    *len = size;
+    *len = i;
     *data = (byte *)buf;
-    return code;
+    return 0;
 }
 
 static int pdfi_obj_array_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *len)
@@ -789,7 +803,7 @@ static int pdfi_obj_stream_str(pdf_context *ctx, pdf_obj *obj, byte **data, int 
     int code = 0;
     byte *buf;
     pdf_stream *stream = (pdf_stream *)obj;
-    int64_t bufsize;
+    int64_t bufsize = 0;
     pdf_indirect_ref *streamref = NULL;
 
     /* TODO: How to deal with stream dictionaries?
@@ -833,6 +847,10 @@ static int pdfi_obj_dict_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *l
     uint64_t index, dictsize;
     uint64_t itemnum = 0;
 
+    code = pdfi_loop_detector_mark(ctx);
+    if (code < 0)
+        return code;
+
     code = pdfi_bufstream_init(ctx, &bufstream);
     if (code < 0) goto exit;
 
@@ -851,6 +869,18 @@ static int pdfi_obj_dict_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *l
     /* Note: We specifically fetch without dereferencing, so there will be no circular
      * references to handle here.
      */
+    /* Wrong.... */
+
+    if (dict->object_num !=0 ) {
+        if (pdfi_loop_detector_check_object(ctx, dict->object_num)) {
+            code = gs_note_error(gs_error_circular_reference);
+            goto exit;
+        }
+        code = pdfi_loop_detector_add_object(ctx, dict->object_num);
+        if (code < 0)
+            goto exit;
+    }
+
     /* Get each (key,val) pair from dict and setup param for it */
     code = pdfi_dict_key_first(ctx, dict, (pdf_obj **)&Key, &index);
     while (code >= 0) {
@@ -914,6 +944,32 @@ static int pdfi_obj_dict_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *l
     pdfi_countdown(Key);
     pdfi_countdown(Value);
     pdfi_bufstream_free(ctx, &bufstream);
+    if (code < 0)
+        (void)pdfi_loop_detector_cleartomark(ctx);
+    else
+        code = pdfi_loop_detector_cleartomark(ctx);
+    return code;
+}
+
+#define PARAM1(A) # A,
+#define PARAM2(A,B) A,
+static const char pdf_token_strings[][10] = {
+#include "pdf_tokens.h"
+};
+
+static int pdfi_obj_fast_keyword_str(pdf_context *ctx, pdf_obj *obj, byte **data, int *len)
+{
+    int code = 0;
+    const char *s = pdf_token_strings[(uintptr_t)obj];
+    int size = (int)strlen(s) + 1;
+    byte *buf;
+
+    buf = gs_alloc_bytes(ctx->memory, size, "pdfi_obj_name_str(data)");
+    if (buf == NULL)
+        return_error(gs_error_VMerror);
+    memcpy(buf, s, size);
+    *data = buf;
+    *len = size;
     return code;
 }
 
@@ -928,6 +984,7 @@ obj_str_dispatch_t obj_str_dispatch[] = {
     {PDF_STREAM, pdfi_obj_stream_str},
     {PDF_INDIRECT, pdfi_obj_indirect_str},
     {PDF_NULL, pdfi_obj_null_str},
+    {PDF_FAST_KEYWORD, pdfi_obj_fast_keyword_str},
     {0, NULL}
 };
 
@@ -937,11 +994,13 @@ int pdfi_obj_to_string(pdf_context *ctx, pdf_obj *obj, byte **data, int *len)
 {
     obj_str_dispatch_t *dispatch_ptr;
     int code = 0;
+    pdf_obj_type type;
 
     *data = NULL;
     *len = 0;
+    type = pdfi_type_of(obj);
     for (dispatch_ptr = obj_str_dispatch; dispatch_ptr->func; dispatch_ptr ++) {
-        if (obj->type == dispatch_ptr->type) {
+        if (type == dispatch_ptr->type) {
             code = dispatch_ptr->func(ctx, obj, data, len);
             goto exit;
         }

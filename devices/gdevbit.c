@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -208,7 +208,7 @@ const gx_device_bit gs_bitrgbtags_device =
         (int)((float)(110) * (Y_DPI) / 10 + 0.5),/* height */
         0, /* Pad */
         0, /* log2_align_mod */
-        0, /* is_planar */
+        0, /* num_planar_planes */
         0, /* LeadingEdge */
         {
             (float)(((((int)((float)(85) * (X_DPI) / 10 + 0.5)) * 72.0 + 0.5) - 0.5) / (X_DPI)),
@@ -263,6 +263,7 @@ const gx_device_bit gs_bitrgbtags_device =
         0, /*icc_struct*/
         GS_UNKNOWN_TAG,         /* this device supports tags */
         1,			/* default interpolate_control */
+        0,                      /* default non_srict_bounds */
         {
             gx_default_install,
             gx_default_begin_page,
@@ -336,7 +337,7 @@ bittag_rgb_map_rgb_color(gx_device * dev, const gx_color_value cv[])
 }
 
 static int
-bittag_map_color_rgb(gx_device * dev, gx_color_index color, gx_color_value cv[4])
+bittag_map_color_rgb(gx_device * dev, gx_color_index color, gx_color_value cv[3])
 {
     int depth = 24;
     int ncomp = 3;
@@ -426,7 +427,7 @@ bitrgb_rgb_map_rgb_color(gx_device * dev, const gx_color_value cv[])
 /* Map color to RGB.  This has 3 separate cases, but since it is rarely */
 /* used, we do a case test rather than providing 3 separate routines. */
 static int
-bit_map_color_rgb(gx_device * dev, gx_color_index color, gx_color_value cv[4])
+bit_map_color_rgb(gx_device * dev, gx_color_index color, gx_color_value cv[3])
 {
     int depth = dev->color_info.depth;
     int ncomp = REAL_NUM_COMPONENTS(dev);

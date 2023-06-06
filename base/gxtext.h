@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -124,7 +124,7 @@ rc_free_proc(rc_free_text_enum);
     int bytes_decoded; \
     gs_point FontBBox_as_Metrics2;  /* used with FontType 9,11 && WMode 1 */\
     ulong text_enum_id; /* debug purpose only - not used by algorythm. */\
-    bool k_text_release; /* Set at time of gs_text_begin to know to do release of black_text_state */\
+    bool k_text_release; /* Set at time of gs_text_begin to know to do release of black_textvec_state */\
     /* The following is controlled by a device. */\
     bool device_disabled_grid_fitting;\
     /* Following two members moved from the show enumerator */\

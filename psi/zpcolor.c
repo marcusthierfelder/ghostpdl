@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -245,7 +245,7 @@ pattern_paint_prepare(i_ctx_t *i_ctx_p)
         gs_setdevice_no_init(pgs, (gx_device *)pdev);
         if (pinst->templat.uses_transparency) {
             if_debug0m('v', imemory, "   pushing the pdf14 compositor device into this graphics state\n");
-            if ((code = gs_push_pdf14trans_device(pgs, true, true, 0, 0)) < 0)  /* FIXME: do we need spot_color_count ??? */
+            if ((code = gs_push_pdf14trans_device(pgs, true, true, 0, 0)) < 0)  /* spot color count found from pdf14 target */
                 return code;
         } else { /* not transparent */
             if (pinst->templat.PaintType == 1 && !(pinst->is_clist)

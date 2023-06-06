@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -110,6 +110,8 @@ s_init(stream *s, gs_memory_t * mem)
     s->prev = s->next = 0;	/* clean for GC */
     s->file_name.data = 0;	/* ibid. */
     s->file_name.size = 0;
+    s->end_status = 0;
+    s->modes = 0;
     s->close_strm = false;	/* default */
     s->close_at_eod = true;	/* default */
     s->cbuf_string_memory = NULL;
@@ -1294,6 +1296,7 @@ s_add_filter(stream **ps, const stream_template *templat,
 int
 s_close_filters(stream **ps, stream *target)
 {
+    int code = 0;
     while (*ps != target) {
         stream *s = *ps;
         gs_memory_t *mem = s->state->memory;
@@ -1304,8 +1307,8 @@ s_close_filters(stream **ps, stream *target)
         int status = sclose(s);
         stream_state *ss = s->state; /* sclose may set this to s */
 
-        if (status < 0)
-            return status;
+        if (code == 0)
+            code = status;
 
         if (s->cbuf_string_memory != NULL) { /* stream owns string buffer, so free it */
             gs_free_object(cbuf_string_memory, cbuf, "s_close_filters(cbuf)");
@@ -1320,7 +1323,7 @@ s_close_filters(stream **ps, stream *target)
         }
         *ps = next;
     }
-    return 0;
+    return code;
 }
 
 /* ------ Stream closing ------ */

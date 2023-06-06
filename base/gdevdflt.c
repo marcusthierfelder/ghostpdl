@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Default device implementation */
@@ -729,6 +729,7 @@ gx_device_fill_in_procs(register gx_device * dev)
     fill_dev_proc(dev, process_page, gx_default_process_page);
     fill_dev_proc(dev, transform_pixel_region, gx_default_transform_pixel_region);
     fill_dev_proc(dev, fill_stroke_path, gx_default_fill_stroke_path);
+    fill_dev_proc(dev, lock_pattern, gx_default_lock_pattern);
 }
 
 
@@ -971,6 +972,8 @@ gx_default_dev_spec_op(gx_device *pdev, int dev_spec_op, void *data, int size)
         case gxdso_supports_alpha:
         case gxdso_pdf14_sep_device:
         case gxdso_supports_pattern_transparency:
+        case gxdso_overprintsim_state:
+        case gxdso_skip_icc_component_validation:
             return 0;
         case gxdso_pattern_shfill_doesnt_need_path:
             return (dev_proc(pdev, fill_path) == gx_default_fill_path);
@@ -1258,6 +1261,7 @@ int gx_copy_device_procs(gx_device *dest, const gx_device *src, const gx_device 
     set_dev_proc(dest, process_page, dev_proc(&prototype, process_page));
     set_dev_proc(dest, transform_pixel_region, dev_proc(&prototype, transform_pixel_region));
     set_dev_proc(dest, fill_stroke_path, dev_proc(&prototype, fill_stroke_path));
+    set_dev_proc(dest, lock_pattern, dev_proc(&prototype, lock_pattern));
 
     /*
      * We absolutely must set the 'set_graphics_type_tag' to the default subclass one
@@ -1344,6 +1348,9 @@ int gx_device_subclass(gx_device *dev_to_subclass, gx_device *new_prototype, uns
     child_dev->stype = a_std;
     child_dev->stype_is_dynamic = 1;
 
+    /* At this point, the only counted reference to the child is from its parent, and we need it to use the right allocator */
+    rc_init(child_dev, dev_to_subclass->memory->stable_memory, 1);
+
     psubclass_data = (void *)gs_alloc_bytes(dev_to_subclass->memory->non_gc_memory, private_data_size, "subclass memory for subclassing device");
     if (psubclass_data == 0){
         gs_free_const_object(dev_to_subclass->memory->non_gc_memory, b_std, "gs_device_subclass(stype)");
@@ -1429,12 +1436,15 @@ void gx_device_unsubclass(gx_device *dev)
     gx_device *parent, *child;
     gs_memory_struct_type_t *a_std = 0, *b_std = 0;
     int dynamic, ref_count;
+    gs_memory_t *rcmem;
 
     /* This should not happen... */
     if (!dev)
         return;
 
     ref_count = dev->rc.ref_count;
+    rcmem = dev->rc.memory;
+
     child = dev->child;
     psubclass_data = (generic_subclass_data *)dev->subclass_data;
     parent = dev->parent;
@@ -1481,6 +1491,7 @@ void gx_device_unsubclass(gx_device *dev)
          * when we copy back the subclassed device.
          */
         dev->rc.ref_count = ref_count;
+        dev->rc.memory = rcmem;
 
         /* If we have a chain of devices, make sure the chain beyond the
          * device we're unsubclassing doesn't get broken, we need to
@@ -1499,12 +1510,6 @@ void gx_device_unsubclass(gx_device *dev)
      * devices it's possible that their child pointer can then be NULL.
      */
     if (child) {
-        if (child->icc_struct)
-            rc_decrement(child->icc_struct, "gx_device_unsubclass, icc_struct");
-        if (child->PageList)
-            rc_decrement(child->PageList, "gx_device_unsubclass, PageList");
-        if (child->NupControl)
-            rc_decrement(child->NupControl, "gx_device_unsubclass, NupControl");
         /* We cannot afford to free the child device if its stype is not
          * dynamic because we can't 'null' the finalise routine, and we
          * cannot permit the device to be finalised because we have copied
@@ -1517,8 +1522,7 @@ void gx_device_unsubclass(gx_device *dev)
              * just security here. */
             child->parent = NULL;
             child->child = NULL;
-            /* Make certain the memory will be freed, zap the reference count */
-            child->rc.ref_count = 0;
+
             /* We *don't* want to run the finalize routine. This would free
              * the stype and properly handle the icc_struct and PageList,
              * but for devices with a custom finalize (eg psdcmyk) it might
@@ -1527,22 +1531,27 @@ void gx_device_unsubclass(gx_device *dev)
              * variable is just to get rid of const warnings.
              */
             b_std = (gs_memory_struct_type_t *)child->stype;
-            b_std->finalize = NULL;
-            /* Having patched the stype, we need to make sure the memory
+            gs_free_const_object(dev->memory->non_gc_memory, b_std, "gs_device_unsubclass(stype)");
+            /* Make this into a generic device */
+            child->stype = &st_device;
+            child->stype_is_dynamic = false;
+
+            /* We can't simply discard the child device, because there may be references to it elsewhere,
+               but equally, we really don't want it doing anything, so set the procs so actions are just discarded.
+             */
+            gx_copy_device_procs(child, (gx_device *)&gs_null_device, (gx_device *)&gs_null_device);
+
+            /* Having changed the stype, we need to make sure the memory
              * manager uses it. It keeps a copy in its own data structure,
              * and would use that copy, which would mean it would call the
              * finalize routine that we just patched out.
              */
-            gs_set_object_type(dev->memory->stable_memory, child, b_std);
+            gs_set_object_type(dev->memory->stable_memory, child, child->stype);
+            child->finalize = NULL;
             /* Now (finally) free the child memory */
-            gs_free_object(dev->memory->stable_memory, child, "gx_device_unsubclass(device)");
-            /* And the stype for it */
-            gs_free_const_object(dev->memory->non_gc_memory, b_std, "gs_device_unsubclass(stype)");
-            child = 0;
+            rc_decrement(child, "gx_device_unsubclass(device)");
         }
     }
-    if(child)
-        child->parent = dev;
     dev->parent = parent;
 
     /* If this device has a dynamic stype, we wnt to keep using it, but we copied
@@ -1570,7 +1579,7 @@ int gx_update_from_subclass(gx_device *dev)
     dev->pad = dev->child->pad;
     dev->log2_align_mod = dev->child->log2_align_mod;
     dev->max_fill_band = dev->child->max_fill_band;
-    dev->is_planar = dev->child->is_planar;
+    dev->num_planar_planes = dev->child->num_planar_planes;
     dev->LeadingEdge = dev->child->LeadingEdge;
     memcpy(&dev->ImagingBBox, &dev->child->ImagingBBox, sizeof(dev->child->ImagingBBox));
     dev->ImagingBBox_set = dev->child->ImagingBBox_set;

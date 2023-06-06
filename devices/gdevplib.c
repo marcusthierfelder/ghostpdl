@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* PLanar Interlaced Banded device */
@@ -577,8 +577,8 @@ plib_setup_buf_device(gx_device *bdev, byte *buffer, int bytes_per_line,
          */
         line_ptrs = (byte **)
             gs_alloc_byte_array(mdev->memory,
-                                (mdev->is_planar ?
-                                 full_height * mdev->color_info.num_components :
+                                (mdev->num_planar_planes ?
+                                 full_height * mdev->num_planar_planes :
                                  setup_height),
                                 sizeof(byte *), "setup_buf_device");
         if (line_ptrs == 0)
@@ -586,11 +586,11 @@ plib_setup_buf_device(gx_device *bdev, byte *buffer, int bytes_per_line,
         mdev->line_pointer_memory = mdev->memory;
         mdev->foreign_line_pointers = false;
         mdev->line_ptrs = line_ptrs;
-        mdev->raster = bandBufferStride * (mdev->is_planar ? mdev->color_info.num_components : 1);
+        mdev->raster = bandBufferStride * (mdev->num_planar_planes ? mdev->num_planar_planes : 1);
     }
     mdev->height = full_height;
     code = set_line_ptrs(mdev,
-                         bandBufferBase + bandBufferStride*(mdev->is_planar ? mdev->color_info.num_components : 1)*y,
+                         bandBufferBase + bandBufferStride*(mdev->num_planar_planes ? mdev->num_planar_planes : 1)*y,
                          bandBufferStride,
                          line_ptrs,
                          setup_height);
@@ -666,7 +666,7 @@ plib_open(gx_device * pdev)
     bdev->printer_procs.buf_procs.create_buf_device = plib_create_buf_device;
     bdev->printer_procs.buf_procs.setup_buf_device = plib_setup_buf_device;
     bdev->printer_procs.buf_procs.size_buf_device = plib_size_buf_device;
-    pdev->is_planar = 1;
+    pdev->num_planar_planes = 1;
 
     bdev->space_params.banding_type = BandingAlways;
 
@@ -734,7 +734,7 @@ plibg_encode_color(gx_device * pdev, const gx_color_value cv[])
 /* Map a gray value back to an RGB color. */
 static int
 plibg_decode_color(gx_device * dev, gx_color_index color,
-                   gx_color_value prgb[3])
+                   gx_color_value prgb[])
 {
     gx_color_value gray =
     color * gx_max_color_value / dev->color_info.max_gray;
@@ -748,7 +748,7 @@ plibg_decode_color(gx_device * dev, gx_color_index color,
 /* Map an rgb color tuple back to an RGB color. */
 static int
 plib_decode_color(gx_device * dev, gx_color_index color,
-                  gx_color_value prgb[3])
+                  gx_color_value prgb[])
 {
     uint bitspercolor = dev->color_info.depth / 3;
     uint colormask = (1 << bitspercolor) - 1;
@@ -766,7 +766,7 @@ plib_decode_color(gx_device * dev, gx_color_index color,
 /* Map a cmyk color tuple back to CMYK colorants. */
 static int
 plibc_decode_color(gx_device * dev, gx_color_index color,
-                   gx_color_value prgb[4])
+                   gx_color_value prgb[])
 {
     uint bitspercolor = dev->color_info.depth / 4;
     uint colormask = (1 << bitspercolor) - 1;

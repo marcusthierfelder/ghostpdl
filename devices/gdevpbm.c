@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Portable Bit/Gray/PixMap drivers */
@@ -336,7 +336,7 @@ ppm_open(gx_device * pdev)
     pdev->log2_align_mod = 6;
 #endif
 
-    code = gdev_prn_open_planar(pdev, bdev->UsePlanarBuffer);
+    code = gdev_prn_open_planar(pdev, bdev->UsePlanarBuffer ? pdev->color_info.num_components : 0);
     while (pdev->child)
         pdev = pdev->child;
 
@@ -456,7 +456,7 @@ pnm_encode_color(gx_device * pdev, const gx_color_value cv[])
 /* Map a PPM color tuple back to an RGB color. */
 static int
 ppm_decode_color(gx_device * dev, gx_color_index color,
-                 gx_color_value prgb[3])
+                 gx_color_value prgb[])
 {
     uint bitspercolor = dev->color_info.depth / 3;
     uint colormask = (1 << bitspercolor) - 1;

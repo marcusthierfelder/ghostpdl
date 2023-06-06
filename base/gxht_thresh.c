@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -868,7 +868,7 @@ gxht_thresh_planes(gx_image_enum *penum, fixed xrun,
     int offset_bits = penum->ht_offset_bits;
     byte *halftone;
     int dithered_stride = penum->ht_stride;
-    bool is_planar_dev = dev->is_planar;
+    bool is_planar_dev = dev->num_planar_planes;
     gx_color_index dev_white = gx_device_white(dev);
     gx_color_index dev_black = gx_device_black(dev);
     int spp_out = dev->color_info.num_components;

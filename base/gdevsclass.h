@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -55,6 +55,7 @@ dev_proc_strip_tile_rectangle(default_subclass_strip_tile_rectangle);
 dev_proc_get_clipping_box(default_subclass_get_clipping_box);
 dev_proc_begin_typed_image(default_subclass_begin_typed_image);
 dev_proc_get_bits_rectangle(default_subclass_get_bits_rectangle);
+dev_proc_composite(default_subclass_composite_front);
 dev_proc_composite(default_subclass_composite);
 dev_proc_get_hardware_params(default_subclass_get_hardware_params);
 dev_proc_text_begin(default_subclass_text_begin);
@@ -89,6 +90,7 @@ dev_proc_copy_alpha_hl_color(default_subclass_copy_alpha_hl_color);
 dev_proc_process_page(default_subclass_process_page);
 dev_proc_transform_pixel_region(default_subclass_transform_pixel_region);
 dev_proc_fill_stroke_path(default_subclass_fill_stroke_path);
+dev_proc_lock_pattern(default_subclass_lock_pattern);
 dev_page_proc_install(default_subclass_install);
 dev_page_proc_begin_page(default_subclass_begin_page);
 dev_page_proc_end_page(default_subclass_end_page);

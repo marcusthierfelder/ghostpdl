@@ -1,14 +1,16 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
    implied.
 
-   This software is distributed under license and may not be copied, modified
-   or distributed except as expressly authorized under the terms of that
-   license.  Refer to licensing information at http://www.artifex.com/
-   or contact Artifex Software, Inc.,  1305 Grant Avenue - Suite 200,
-   Novato, CA 94945, U.S.A., +1(415)492-9861, for further information.
+   This software is distributed under license and may not be copied,
+   modified or distributed except as expressly authorized under the terms
+   of the license contained in the file LICENSE in this distribution.
+
+   Refer to licensing information at http://www.artifex.com or contact
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Font API support  */
@@ -199,6 +201,8 @@ struct gs_fapi_font_s
     int (*get_glyph) (gs_fapi_font *ff, gs_glyph char_code, byte *buf, int buf_length);
 
     int (*serialize_tt_font) (gs_fapi_font *ff, void *buf, int buf_size);
+
+    int (*retrieve_tt_font) (gs_fapi_font *ff, void **buf, int *buf_size);
 
     int (*get_charstring) (gs_fapi_font *ff, int index, byte *buf, ushort buf_length);
 

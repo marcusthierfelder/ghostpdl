@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Alpha-buffering memory devices */
@@ -22,6 +22,7 @@
 #include "gdevmem.h"		/* private definitions */
 #include "gzstate.h"
 #include "gxdevcli.h"
+#include "gxdevsop.h"
 
 /* ================ Alpha devices ================ */
 
@@ -74,6 +75,7 @@ static dev_proc_copy_mono(mem_abuf_copy_mono);
 static dev_proc_fill_rectangle(mem_abuf_fill_rectangle);
 static dev_proc_get_clipping_box(mem_abuf_get_clipping_box);
 static dev_proc_fill_rectangle_hl_color(mem_abuf_fill_rectangle_hl_color);
+static dev_proc_fill_stroke_path(mem_abuf_fill_stroke_path);
 
 /* The device descriptor. */
 static void
@@ -88,6 +90,7 @@ mem_alpha_initialize_device_procs(gx_device *dev)
     set_dev_proc(dev, copy_color, gx_default_copy_color);
     set_dev_proc(dev, strip_copy_rop2, gx_no_strip_copy_rop2);
     set_dev_proc(dev, fill_rectangle_hl_color, mem_abuf_fill_rectangle_hl_color);
+    set_dev_proc(dev, fill_stroke_path, mem_abuf_fill_stroke_path);
 }
 
 static const gx_device_memory mem_alpha_buffer_device =
@@ -412,6 +415,77 @@ mem_abuf_fill_rectangle_hl_color(gx_device * dev, const gs_fixed_rect *rect,
             return code;
     }
     return 0;
+}
+
+/*
+ * Fill/Stroke a path.  This is the default implementation of the driver
+ * fill_path procedure.
+ */
+int
+mem_abuf_fill_stroke_path(gx_device * pdev, const gs_gstate * pgs,
+                          gx_path * ppath,
+                          const gx_fill_params * params_fill,
+                          const gx_device_color * pdevc_fill,
+                          const gx_stroke_params * params_stroke,
+                          const gx_device_color * pdevc_stroke,
+                          const gx_clip_path * pcpath)
+{
+    int code = 0;
+    int code1;
+    int has_comp = 1;
+    overprint_abuf_state_t param;
+    gx_device_memory* const mdev = (gx_device_memory*)pdev;
+
+    param.op_trans = OP_FS_TRANS_PREFILL;
+    param.pgs = pgs;
+    param.pcpath = pcpath;
+    param.ppath = ppath;
+    param.alpha_buf_path_scale = mdev->log2_scale;
+
+    /* Tell any overprint compositor (maybe a pdf14 device) that's listening to get ready for a fill/stroke. */
+    code = dev_proc(pdev, dev_spec_op)(pdev, gxdso_abuf_optrans, &param, sizeof(param));
+    if (code == gs_error_undefined)
+        has_comp = false; /* No compositor listening. */
+    else if (code < 0)
+        return code; /* Any other error is real. */
+
+    /* Do the fill. */
+    code = dev_proc(pdev, fill_path)(pdev, pgs, ppath, params_fill, pdevc_fill, pcpath);
+    if (code < 0) {
+        /* If the fill failed do any tidy up necessary. */
+        if (has_comp) {
+            param.op_trans = OP_FS_TRANS_CLEANUP;
+            code1 = dev_proc(pdev, dev_spec_op)(pdev, gxdso_abuf_optrans, &param, sizeof(param));
+            if (code1 < 0)
+                code = code1; /* If the pdf14 cleanup failed that is (more) fatal! */
+        }
+        return code;
+    }
+    abuf_flush(mdev);
+
+    /* Handle stroke */
+    gs_swapcolors_quick(pgs);
+    if (has_comp) {
+        param.op_trans = OP_FS_TRANS_PRESTROKE;
+        code = dev_proc(pdev, dev_spec_op)(pdev, gxdso_abuf_optrans, &param, sizeof(param));
+        if (code < 0)
+        {
+            gs_swapcolors_quick(pgs);
+            return code;
+        }
+    }
+    code = dev_proc(pdev, stroke_path)(pdev, pgs, ppath, params_stroke, pdevc_stroke, pcpath);
+    abuf_flush(mdev);
+    gs_swapcolors_quick(pgs);
+
+    /* Tell the compositors we're done. */
+    if (has_comp) {
+        param.op_trans = OP_FS_TRANS_POSTSTROKE;
+        code1 = dev_proc(pdev, dev_spec_op)(pdev, gxdso_abuf_optrans, &param, sizeof(param));
+        if (code >= 0)
+            code = code1;
+    }
+    return code;
 }
 
 /* Get the clipping box.  We must scale this up by the number of alpha bits. */

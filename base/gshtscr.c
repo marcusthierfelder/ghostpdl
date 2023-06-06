@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -344,6 +344,15 @@ pick_cell_size(gs_screen_halftone * ph, const gs_matrix * pmat, ulong max_size,
 
     if (u0 == 0 && v0 == 0)
         return_error(gs_error_rangecheck);
+
+    /* We increment rt in a loop below until (u+v) * rt
+     * is at least 4. Make sure that rt has enough range
+     * to satisfy that calculation. If it doesn't then
+     * give up (silly values).
+     */
+    if ((fabs(u0) + fabs(v0)) < ((double)5.0 / max_int))
+        return_error(gs_error_rangecheck);
+
     while ((fabs(u0) + fabs(v0)) * rt < 4)
         ++rt;
     phcp->C = 0;

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -690,7 +690,7 @@ void gp_enumerate_files_close_impl(gs_memory_t *memory, file_enum * pfen);
  * a unicode codepoint. Returns EOF for end of file (or string).
  */
 int
-gp_local_arg_encoding_get_codepoint(gp_file *file, const char **astr);
+gp_local_arg_encoding_get_codepoint(stream *s, const char **astr);
 
 int
 gp_xpsprint(char *filename, char *printername, int *result);

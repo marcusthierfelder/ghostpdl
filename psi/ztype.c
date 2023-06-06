@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -267,6 +267,11 @@ zcvi(i_ctx_t *i_ctx_p)
                     code = gs_note_error(gs_error_syntaxerror);
                 if (code < 0)
                     return code;
+                /* gs_scan_string_token() can relocate the operand stack if a
+                 * stack overflow occurs. If that happens then 'op' is no
+                 * longer valid, so reload it now just in case.
+                 */
+                op = osp;
                 switch (r_type(&token)) {
                     case t_integer:
                         *op = token;
@@ -338,6 +343,11 @@ zcvr(i_ctx_t *i_ctx_p)
                     code = gs_note_error(gs_error_syntaxerror);
                 if (code < 0)
                     return code;
+                /* gs_scan_string_token() can relocate the operand stack if a
+                 * stack overflow occurs. If that happens then 'op' is no
+                 * longer valid, so reload it now just in case.
+                 */
+                op = osp;
                 switch (r_type(&token)) {
                     case t_integer:
                         make_real(op, (float)token.value.intval);

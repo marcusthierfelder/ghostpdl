@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -1290,12 +1290,12 @@ gstate_alloc(gs_memory_t * mem, client_name_t cname, const gs_gstate * pfrom)
     gs_gstate *pgs =
         gs_alloc_struct(mem, gs_gstate, &st_gs_gstate, cname);
 
-    if (pgs == 0)
-        return 0;
+    if (pgs == NULL)
+        return NULL;
     memset(pgs, 0x00, sizeof(gs_gstate));
     if (gstate_alloc_parts(pgs, pfrom, mem, cname) < 0) {
         gs_free_object(mem, pgs, cname);
-        return 0;
+        return NULL;
     }
     pgs->memory = mem;
     return pgs;
@@ -1333,7 +1333,7 @@ gstate_clone_core(const gs_gstate               *pfrom,
         if (pdata == NULL ||
             gstate_copy_client_data(pfrom, pdata, pfrom->client_data,
                                     reason) < 0)
-            goto fail;
+            goto failEarly;
     }
     /* Copy the dash and dash pattern if necessary. */
     clone_data->dash = gs_currentlineparams_inline(pfrom)->dash;
@@ -1368,9 +1368,10 @@ gstate_clone_core(const gs_gstate               *pfrom,
     return pgs;
 
   fail:
+    gs_free_object(mem, clone_data->dash.pattern, cname);
     if (pdata != NULL)
         (*pfrom->client_procs.free) (pdata, mem, pgs);
-    gs_free_object(mem, clone_data->dash.pattern, cname);
+  failEarly:
     gstate_free_parts(pgs, mem, cname);
     gs_free_object(mem, pgs, cname);
 

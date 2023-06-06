@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* xref parsing */
@@ -50,7 +50,7 @@ static int resize_xref(pdf_context *ctx, uint64_t new_size)
     return 0;
 }
 
-static int read_xref_stream_entries(pdf_context *ctx, pdf_c_stream *s, uint64_t first, uint64_t last, uint64_t *W)
+static int read_xref_stream_entries(pdf_context *ctx, pdf_c_stream *s, int64_t first, int64_t last, int64_t *W)
 {
     uint i, j;
     uint field_width = 0;
@@ -68,6 +68,9 @@ static int read_xref_stream_entries(pdf_context *ctx, pdf_c_stream *s, uint64_t 
         field_width = W[2];
 
     Buffer = gs_alloc_bytes(ctx->memory, field_width, "read_xref_stream_entry working buffer");
+    if (Buffer == NULL)
+        return_error(gs_error_VMerror);
+
     for (i=first;i<=last; i++){
         /* Defaults if W[n] = 0 */
         type = 1;
@@ -140,8 +143,9 @@ static int read_xref_stream_entries(pdf_context *ctx, pdf_c_stream *s, uint64_t 
 
 /* Forward definition */
 static int read_xref(pdf_context *ctx, pdf_c_stream *s);
+static int pdfi_check_xref_stream(pdf_context *ctx);
 /* These two routines are recursive.... */
-static int pdfi_read_xref_stream_dict(pdf_context *ctx, pdf_c_stream *s);
+static int pdfi_read_xref_stream_dict(pdf_context *ctx, pdf_c_stream *s, int obj_num);
 
 static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *s)
 {
@@ -153,9 +157,10 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
     int64_t size;
     int64_t num;
     int64_t W[3];
+    int objnum;
     bool known = false;
 
-    if (stream_obj->type != PDF_STREAM)
+    if (pdfi_type_of(stream_obj) != PDF_STREAM)
         return_error(gs_error_typecheck);
 
     code = pdfi_dict_from_obj(ctx, (pdf_obj *)stream_obj, &sdict);
@@ -175,6 +180,8 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
     code = pdfi_dict_get_int(ctx, sdict, "Size", &size);
     if (code < 0)
         return code;
+    if (size < 1)
+        return 0;
 
     if (size < 0 || size > floor((double)ARCH_MAX_SIZE_T / (double)sizeof(xref_entry)))
         return_error(gs_error_rangecheck);
@@ -205,6 +212,9 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
         ctx->Trailer = sdict;
         pdfi_countup(sdict);
     } else {
+        if (size > ctx->xref_table->xref_size)
+            return_error(gs_error_rangecheck);
+
         code = pdfi_merge_dicts(ctx, ctx->Trailer, sdict);
         if (code < 0) {
             if (code == gs_error_VMerror || ctx->args.pdfstoponerror)
@@ -282,11 +292,13 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
     }
     for (i=0;i<3;i++) {
         code = pdfi_array_get_int(ctx, a, (uint64_t)i, (int64_t *)&W[i]);
-        if (code < 0) {
+        if (code < 0 || W[i] < 0) {
             pdfi_countdown(a);
             pdfi_close_file(ctx, XRefStrm);
             pdfi_countdown(ctx->xref_table);
             ctx->xref_table = NULL;
+            if (W[i] < 0)
+                code = gs_note_error(gs_error_rangecheck);
             return code;
         }
     }
@@ -294,7 +306,7 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
 
     code = pdfi_dict_get_type(ctx, sdict, "Index", PDF_ARRAY, (pdf_obj **)&a);
     if (code == gs_error_undefined) {
-        code = read_xref_stream_entries(ctx, XRefStrm, 0, size - 1, (uint64_t *)W);
+        code = read_xref_stream_entries(ctx, XRefStrm, 0, size - 1, W);
         if (code < 0) {
             pdfi_close_file(ctx, XRefStrm);
             pdfi_countdown(ctx->xref_table);
@@ -302,7 +314,7 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
             return code;
         }
     } else {
-        int64_t start, end;
+        int64_t start, size;
 
         if (code < 0) {
             pdfi_close_file(ctx, XRefStrm);
@@ -321,6 +333,15 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
 
         for (i=0;i < pdfi_array_size(a);i+=2){
             code = pdfi_array_get_int(ctx, a, (uint64_t)i, &start);
+            if (code < 0 || start < 0) {
+                pdfi_countdown(a);
+                pdfi_close_file(ctx, XRefStrm);
+                pdfi_countdown(ctx->xref_table);
+                ctx->xref_table = NULL;
+                return code;
+            }
+
+            code = pdfi_array_get_int(ctx, a, (uint64_t)i+1, &size);
             if (code < 0) {
                 pdfi_countdown(a);
                 pdfi_close_file(ctx, XRefStrm);
@@ -329,18 +350,11 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
                 return code;
             }
 
-            code = pdfi_array_get_int(ctx, a, (uint64_t)i+1, &end);
-            if (code < 0) {
-                pdfi_countdown(a);
-                pdfi_countdown(start);
-                pdfi_close_file(ctx, XRefStrm);
-                pdfi_countdown(ctx->xref_table);
-                ctx->xref_table = NULL;
-                return code;
-            }
+            if (size < 1)
+                continue;
 
-            if (start + end >= ctx->xref_table->xref_size) {
-                code = resize_xref(ctx, start + end);
+            if (start + size >= ctx->xref_table->xref_size) {
+                code = resize_xref(ctx, start + size);
                 if (code < 0) {
                     pdfi_countdown(a);
                     pdfi_close_file(ctx, XRefStrm);
@@ -350,7 +364,7 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
                 }
             }
 
-            code = read_xref_stream_entries(ctx, XRefStrm, start, start + end - 1, (uint64_t *)W);
+            code = read_xref_stream_entries(ctx, XRefStrm, start, start + size - 1, W);
             if (code < 0) {
                 pdfi_countdown(a);
                 pdfi_close_file(ctx, XRefStrm);
@@ -387,180 +401,205 @@ static int pdfi_process_xref_stream(pdf_context *ctx, pdf_stream *stream_obj, pd
 
     pdfi_seek(ctx, s, num, SEEK_SET);
 
-    code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &objnum);
+    if (code == 1) {
+        if (pdfi_check_xref_stream(ctx))
+            return pdfi_read_xref_stream_dict(ctx, s, objnum);
+    }
+
+    code = pdfi_read_bare_keyword(ctx, ctx->main_stream);
+    if (code < 0)
+        return code;
+    if (code == TOKEN_XREF) {
+        pdfi_set_error(ctx, 0, NULL, E_PDF_PREV_NOT_XREF_STREAM, "pdfi_process_xref_stream", NULL);
+        if (!ctx->args.pdfstoponerror)
+            /* Read old-style xref table */
+            return(read_xref(ctx, ctx->main_stream));
+    }
+    return_error(gs_error_syntaxerror);
+}
+
+static int pdfi_check_xref_stream(pdf_context *ctx)
+{
+    gs_offset_t offset;
+    int gen_num, code = 0;
+
+    offset = pdfi_unread_tell(ctx);
+
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &gen_num);
+    if (code <= 0) {
+        code = 0;
+        goto exit;
+    }
+
+    /* Try to read 'obj' */
+    code = pdfi_read_bare_keyword(ctx, ctx->main_stream);
+    if (code <= 0) {
+        code = 0;
+        goto exit;
+    }
+
+    /* Third element must be obj, or it's not a valid xref */
+    if (code != TOKEN_OBJ)
+        code = 0;
+    else
+        code = 1;
+
+exit:
+    pdfi_seek(ctx, ctx->main_stream, offset, SEEK_SET);
+    return code;
+}
+
+static int pdfi_read_xref_stream_dict(pdf_context *ctx, pdf_c_stream *s, int obj_num)
+{
+    int code;
+    int gen_num;
+
+    if (ctx->args.pdfdebug)
+        dmprintf(ctx->memory, "\n%% Reading PDF 1.5+ xref stream\n");
+
+    /* We have the obj_num. Lets try for obj_num gen obj as a XRef stream */
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &gen_num);
+    if (code <= 0) {
+        if (ctx->args.pdfstoponerror)
+            return code;
+        return(pdfi_repair_file(ctx));
+    }
+
+    /* Try to read 'obj' */
+    code = pdfi_read_bare_keyword(ctx, ctx->main_stream);
     if (code < 0)
         return code;
     if (code == 0)
         return_error(gs_error_syntaxerror);
 
-    if (((pdf_obj *)ctx->stack_top[-1])->type == PDF_KEYWORD && ((pdf_keyword *)ctx->stack_top[-1])->key == TOKEN_XREF) {
-        /* Read old-style xref table */
-        pdfi_pop(ctx, 1);
-        return(read_xref(ctx, ctx->main_stream));
-    } else
-        code = pdfi_read_xref_stream_dict(ctx, s);
-
-    return code;
-}
-
-static int pdfi_read_xref_stream_dict(pdf_context *ctx, pdf_c_stream *s)
-{
-    int code;
-
-    if (ctx->args.pdfdebug)
-        dmprintf(ctx->memory, "\n%% Reading PDF 1.5+ xref stream\n");
-
-    if (((pdf_obj *)ctx->stack_top[-1])->type == PDF_INT) {
-        /* Its an integer, lets try for index gen obj as a XRef stream */
-        code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-
-        if (code <= 0)
-            return(pdfi_repair_file(ctx));
-
-        if (((pdf_obj *)ctx->stack_top[-1])->type != PDF_INT) {
-            /* Second element is not an integer, not a valid xref */
-            pdfi_pop(ctx, 1);
-            return(pdfi_repair_file(ctx));
-        }
-
-        code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-        if (code < 0) {
-            pdfi_pop(ctx, 1);
+    /* Third element must be obj, or it's not a valid xref */
+    if (code != TOKEN_OBJ) {
+        pdfi_set_error(ctx, 0, NULL, E_PDF_BAD_XREFSTMOFFSET, "pdfi_read_xref_stream_dict", "");
+        if (ctx->args.pdfstoponerror)
             return code;
-        }
-        if (code == 0) {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_syntaxerror);
-        }
-
-        if (((pdf_obj *)ctx->stack_top[-1])->type != PDF_KEYWORD) {
-            /* Second element is not an integer, not a valid xref */
-            pdfi_pop(ctx, 2);
-            return(pdfi_repair_file(ctx));
-        } else {
-            int obj_num, gen_num;
-
-            pdf_keyword *keyword = (pdf_keyword *)ctx->stack_top[-1];
-
-            if (keyword->key != TOKEN_OBJ) {
-                pdfi_pop(ctx, 3);
-                return(pdfi_repair_file(ctx));
-            }
-            /* pop the 'obj', generation and object numbers */
-            pdfi_pop(ctx, 1);
-            gen_num = ((pdf_num *)ctx->stack_top[-1])->value.i;
-            pdfi_pop(ctx, 1);
-            obj_num = ((pdf_num *)ctx->stack_top[-1])->value.i;
-            pdfi_pop(ctx, 1);
-
-            do {
-                code = pdfi_read_token(ctx, ctx->main_stream, obj_num, gen_num);
-                if (code <= 0)
-                    return pdfi_repair_file(ctx);
-
-                if (((pdf_obj *)ctx->stack_top[-1])->type == PDF_KEYWORD) {
-                    keyword = (pdf_keyword *)ctx->stack_top[-1];
-                    if (keyword->key == TOKEN_STREAM) {
-                        pdf_dict *dict;
-                        pdf_stream *sdict = NULL;
-                        int64_t Length;
-
-                        /* Remove the 'stream' token from the stack, should leave a dictionary object on the stack */
-                        pdfi_pop(ctx, 1);
-                        if (((pdf_obj *)ctx->stack_top[-1])->type != PDF_DICT) {
-                            pdfi_pop(ctx, 1);
-                            return pdfi_repair_file(ctx);
-                        }
-                        dict = (pdf_dict *)ctx->stack_top[-1];
-
-                        /* Convert the dict into a stream (sdict comes back with at least one ref) */
-                        code = pdfi_obj_dict_to_stream(ctx, dict, &sdict, true);
-                        if (code < 0) {
-                            pdfi_pop(ctx, 1);
-                            /* TODO: should I return code instead of trying to repair?
-                             * Normally the above routine should not fail so something is
-                             * probably seriously fubar.
-                             */
-                            return pdfi_repair_file(ctx);
-                        }
-                        /* Pop off the dict */
-                        pdfi_pop(ctx, 1);
-                        dict = NULL;
-
-                        /* Init the stuff for the stream */
-                        sdict->stream_offset = pdfi_unread_tell(ctx);
-                        sdict->object_num = obj_num;
-                        sdict->generation_num = gen_num;
-
-                        code = pdfi_dict_get_int(ctx, sdict->stream_dict, "Length", &Length);
-                        if (code < 0) {
-                            /* TODO: Not positive this will actually have a length -- just use 0 */
-                            char extra_info[gp_file_name_sizeof];
-
-                            gs_sprintf(extra_info, "Xref Stream object %u missing mandatory keyword /Length\n", obj_num);
-                            pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTREAM, "pdfi_read_xref_stream_dict", extra_info);
-                            code = 0;
-                            Length = 0;
-                        }
-                        sdict->Length = Length;
-                        sdict->length_valid = true;
-
-                        code = pdfi_process_xref_stream(ctx, sdict, ctx->main_stream);
-                        if (code < 0) {
-                            pdfi_countdown(sdict);
-                            return (pdfi_repair_file(ctx));
-                        }
-                        pdfi_countdown(sdict);
-                        break;
-                    }
-                    if (keyword->key == TOKEN_ENDOBJ) {
-                        /* Something went wrong, this is not a stream dictionary */
-                        pdfi_pop(ctx, 3);
-                        return(pdfi_repair_file(ctx));
-                        break;
-                    }
-                }
-            } while(1);
-        }
-    } else {
-        /* Not an 'xref' and not an integer, so not a valid xref */
         return(pdfi_repair_file(ctx));
     }
+
+    do {
+        code = pdfi_read_token(ctx, ctx->main_stream, obj_num, gen_num);
+        if (code <= 0) {
+            if (ctx->args.pdfstoponerror)
+                return code;
+            return pdfi_repair_file(ctx);
+        }
+
+        if (pdfi_count_stack(ctx) >= 2 && pdfi_type_of(ctx->stack_top[-1]) == PDF_FAST_KEYWORD) {
+            uintptr_t keyword = (uintptr_t)ctx->stack_top[-1];
+            if (keyword == TOKEN_STREAM) {
+                pdf_dict *dict;
+                pdf_stream *sdict = NULL;
+                int64_t Length;
+
+                /* Remove the 'stream' token from the stack, should leave a dictionary object on the stack */
+                pdfi_pop(ctx, 1);
+                if (pdfi_type_of(ctx->stack_top[-1]) != PDF_DICT) {
+                    if (ctx->args.pdfstoponerror)
+                        return code;
+                    return pdfi_repair_file(ctx);
+                }
+                dict = (pdf_dict *)ctx->stack_top[-1];
+
+                /* Convert the dict into a stream (sdict comes back with at least one ref) */
+                code = pdfi_obj_dict_to_stream(ctx, dict, &sdict, true);
+                /* Pop off the dict */
+                pdfi_pop(ctx, 1);
+                if (code < 0) {
+                    if (ctx->args.pdfstoponerror)
+                        return code;
+                    /* TODO: should I return code instead of trying to repair?
+                     * Normally the above routine should not fail so something is
+                     * probably seriously fubar.
+                     */
+                    return pdfi_repair_file(ctx);
+                }
+                dict = NULL;
+
+                /* Init the stuff for the stream */
+                sdict->stream_offset = pdfi_unread_tell(ctx);
+                sdict->object_num = obj_num;
+                sdict->generation_num = gen_num;
+
+                code = pdfi_dict_get_int(ctx, sdict->stream_dict, "Length", &Length);
+                if (code < 0) {
+                    /* TODO: Not positive this will actually have a length -- just use 0 */
+                    pdfi_set_error_var(ctx, 0, NULL, E_PDF_BADSTREAM, "pdfi_read_xref_stream_dict", "Xref Stream object %u missing mandatory keyword /Length\n", obj_num);
+                    code = 0;
+                    Length = 0;
+                }
+                sdict->Length = Length;
+                sdict->length_valid = true;
+
+                code = pdfi_process_xref_stream(ctx, sdict, ctx->main_stream);
+                if (code < 0) {
+                    pdfi_countdown(sdict);
+                    if (ctx->args.pdfstoponerror)
+                        return code;
+                    return (pdfi_repair_file(ctx));
+                }
+                pdfi_countdown(sdict);
+                break;
+            } else if (keyword == TOKEN_ENDOBJ) {
+                /* Something went wrong, this is not a stream dictionary */
+                if (ctx->args.pdfstoponerror)
+                    return code;
+                return(pdfi_repair_file(ctx));
+            }
+        }
+    } while(1);
     return 0;
 }
 
 static int skip_to_digit(pdf_context *ctx, pdf_c_stream *s, unsigned int limit)
 {
-    byte c;
-    int bytes, read = 0;
+    int c, read = 0;
 
     do {
-        bytes = pdfi_read_bytes(ctx, &c, 1, 1, s);
-        if (bytes == 0)
+        c = pdfi_read_byte(ctx, s);
+        if (c < 0)
             return_error(gs_error_ioerror);
-        if (c >= 0x30 && c <= 0x39) {
-            pdfi_unread(ctx, s, &c, 1);
-            break;
+        if (c >= '0' && c <= '9') {
+            pdfi_unread_byte(ctx, s, (byte)c);
+            return read;
         }
-        read += bytes;
-    }while (read < limit);
+        read++;
+    } while (read < limit);
+
     return read;
 }
 
-static int read_digits(pdf_context *ctx, pdf_c_stream *s, byte *Buffer, unsigned int limit)
+static int read_digits(pdf_context *ctx, pdf_c_stream *s, byte *Buffer, int limit)
 {
-    int bytes, read = 0;
+    int c, read = 0;
+
+    /* Since the "limit" is a value calculated by the caller,
+       it's easier to check it in one place (here) than before
+       every call.
+     */
+    if (limit <= 0)
+        return_error(gs_error_syntaxerror);
+
+    /* We assume that Buffer always has limit+1 bytes available, so we can
+     * safely terminate it. */
 
     do {
-        bytes = pdfi_read_bytes(ctx, &Buffer[read], 1, 1, s);
-        if (bytes == 0)
+        c = pdfi_read_byte(ctx, s);
+        if (c < 0)
             return_error(gs_error_ioerror);
-        if (Buffer[read] < 0x30 || Buffer[read] > 0x39) {
-            pdfi_unread(ctx, s, &Buffer[read], 1);
+        if (c < '0' || c > '9') {
+            pdfi_unread_byte(ctx, s, c);
             break;
         }
-        read += bytes;
-    }while (read < limit);
+        *Buffer++ = (byte)c;
+        read++;
+    } while (read < limit);
+    *Buffer = 0;
+
     return read;
 }
 
@@ -568,9 +607,8 @@ static int read_digits(pdf_context *ctx, pdf_c_stream *s, byte *Buffer, unsigned
 static int read_xref_entry_slow(pdf_context *ctx, pdf_c_stream *s, gs_offset_t *offset, uint32_t *generation_num, unsigned char *free)
 {
     byte Buffer[20];
-    int code, read = 0, bytes;
+    int c, code, read = 0;
 
-    memset(Buffer, 0x00, 20);
     /* First off, find a number. If we don't find one, and read 20 bytes, throw an error */
     code = skip_to_digit(ctx, s, 20);
     if (code < 0)
@@ -581,7 +619,6 @@ static int read_xref_entry_slow(pdf_context *ctx, pdf_c_stream *s, gs_offset_t *
     code = read_digits(ctx, s, (byte *)&Buffer,  (read > 10 ? 20 - read : 10));
     if (code < 0)
         return code;
-    Buffer[code] = 0x00;
     read += code;
 
     *offset = atol((const char *)Buffer);
@@ -593,23 +630,22 @@ static int read_xref_entry_slow(pdf_context *ctx, pdf_c_stream *s, gs_offset_t *
     read += code;
 
     /* and read it */
-    code = read_digits(ctx, s, (byte *)&Buffer,  (read > 15 ? 20 - read : 5));
+    code = read_digits(ctx, s, (byte *)&Buffer, (read > 15 ? 20 - read : 5));
     if (code < 0)
         return code;
-    Buffer[code] = 0x00;
     read += code;
 
     *generation_num = atol((const char *)Buffer);
 
     do {
-        bytes = pdfi_read_bytes(ctx, &Buffer[0], 1, 1, s);
-        if (bytes == 0)
+        c = pdfi_read_byte(ctx, s);
+        if (c < 0)
             return_error(gs_error_ioerror);
-        read += bytes;
-        if (Buffer[0] == 0x09 || Buffer[0] == 0x20)
+        read ++;
+        if (c == 0x09 || c == 0x20)
             continue;
-        if (Buffer[0] == 'n' || Buffer[0] == 'f') {
-            *free = Buffer[0];
+        if (c == 'n' || c == 'f') {
+            *free = (unsigned char)c;
             break;
         } else {
             return_error(gs_error_syntaxerror);
@@ -619,9 +655,11 @@ static int read_xref_entry_slow(pdf_context *ctx, pdf_c_stream *s, gs_offset_t *
         return_error(gs_error_syntaxerror);
 
     do {
-        bytes = pdfi_read_bytes(ctx, &Buffer[0], 1, 1, s);
-        read += bytes;
-        if (Buffer[0] == 0x20 || Buffer[0] == 0x09 || Buffer[0] == 0x0d || Buffer[0] == 0x0a)
+        c = pdfi_read_byte(ctx, s);
+        if (c < 0)
+            return_error(gs_error_syntaxerror);
+        read++;
+        if (c == 0x20 || c == 0x09 || c == 0x0d || c == 0x0a)
             continue;
     } while (read < 20);
     return 0;
@@ -632,7 +670,7 @@ static int write_offset(byte *B, gs_offset_t o, unsigned int g, unsigned char fr
     byte b[20], *ptr = B;
     int index = 0;
 
-    gs_sprintf((char *)b, "%"PRIdOFFSET"", o);
+    gs_snprintf((char *)b, sizeof(b), "%"PRIdOFFSET"", o);
     if (strlen((const char *)b) > 10)
         return_error(gs_error_rangecheck);
     for(index=0;index < 10 - strlen((const char *)b); index++) {
@@ -642,7 +680,7 @@ static int write_offset(byte *B, gs_offset_t o, unsigned int g, unsigned char fr
     ptr += strlen((const char *)b);
     *ptr++ = 0x20;
 
-    gs_sprintf((char *)b, "%d", g);
+    gs_snprintf((char *)b, sizeof(b), "%d", g);
     if (strlen((const char *)b) > 5)
         return_error(gs_error_rangecheck);
     for(index=0;index < 5 - strlen((const char *)b);index++) {
@@ -660,8 +698,8 @@ static int write_offset(byte *B, gs_offset_t o, unsigned int g, unsigned char fr
 static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *section_start, uint64_t *section_size)
 {
     int code = 0, i, j;
-    pdf_obj *o = NULL;
-    uint64_t start = 0, size = 0;
+    int start = 0;
+    int size = 0;
     int64_t bytes = 0;
     char Buffer[21];
 
@@ -670,44 +708,37 @@ static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *sectio
     if (ctx->args.pdfdebug)
         dmprintf(ctx->memory, "\n%% Reading xref section\n");
 
-    code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &start);
+    if (code < 0) {
+        /* Not an int, might be a keyword */
+        code = pdfi_read_bare_keyword(ctx, ctx->main_stream);
+        if (code < 0)
+            return code;
 
+        if (code != TOKEN_TRAILER) {
+            /* element is not an integer, and not a keyword - not a valid xref */
+            return_error(gs_error_typecheck);
+        }
+        return 1;
+    }
+
+    if (start < 0)
+        return_error(gs_error_rangecheck);
+
+    *section_start = start;
+
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &size);
     if (code < 0)
         return code;
-
-    if (pdfi_count_stack(ctx) < 1)
-        return_error(gs_error_stackunderflow);
-
-    o = ctx->stack_top[-1];
-    if (o->type == PDF_KEYWORD)
-        return 0;
-
-    if (o->type != PDF_INT) {
-        /* element is not an integer, not a valid xref */
-        pdfi_pop(ctx, 1);
-        return_error(gs_error_typecheck);
-    }
-
-    *section_start = start = ((pdf_num *)o)->value.i;
-
-    code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-    if (code < 0) {
-        pdfi_pop(ctx, 1);
-        return code;
-    }
-    if (code == 0) {
-        pdfi_pop(ctx, 1);
+    if (code == 0)
         return_error(gs_error_syntaxerror);
-    }
 
-    o = ctx->stack_top[-1];
-    if (o->type != PDF_INT) {
-        /* element is not an integer, not a valid xref */
-        pdfi_pop(ctx, 2);
-        return_error(gs_error_typecheck);
-    }
-    *section_size = size = ((pdf_num *)o)->value.i;
-    pdfi_pop(ctx, 2);
+    /* Zero sized xref sections are valid; see the file attached to
+     * bug 704947 for an example. */
+    if (size < 0)
+        return_error(gs_error_rangecheck);
+
+    *section_size = size;
 
     if (ctx->args.pdfdebug)
         dmprintf2(ctx->memory, "\n%% Section starts at %d and has %d entries\n", (unsigned int) start, (unsigned int)size);
@@ -755,9 +786,12 @@ static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *sectio
         if (bytes < 20)
             return_error(gs_error_ioerror);
         j = 19;
+        if ((Buffer[19] != 0x0a && Buffer[19] != 0x0d) || (Buffer[18] != 0x0d && Buffer[18] != 0x0a && Buffer[18] != 0x20))
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_XREF_ENTRY_SIZE, "read_xref_section", NULL);
         while (Buffer[j] != 0x0D && Buffer[j] != 0x0A) {
-            pdfi_unread(ctx, s, (byte *)&Buffer[j], 1);
+            pdfi_unread_byte(ctx, s, (byte)Buffer[j]);
             if (--j < 0) {
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_XREF_ENTRY_NO_EOL, "read_xref_section", NULL);
                 dmprintf(ctx->memory, "Invalid xref entry, line terminator missing.\n");
                 code = read_xref_entry_slow(ctx, s, &off, &gen, &free);
                 if (code < 0)
@@ -774,6 +808,7 @@ static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *sectio
             continue;
 
         if (sscanf(Buffer, "%"PRIdOFFSET" %d %c", &entry->u.uncompressed.offset, &entry->u.uncompressed.generation_num, &free) != 3) {
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_XREF_ENTRY_FORMAT, "read_xref_section", NULL);
             dmprintf(ctx->memory, "Invalid xref entry, incorrect format.\n");
             pdfi_unread(ctx, s, (byte *)Buffer, 20);
             code = read_xref_entry_slow(ctx, s, &off, &gen, &free);
@@ -790,6 +825,11 @@ static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *sectio
             entry->free = true;
         if(free == 'n')
             entry->free = false;
+        if (entry->object_num == 0) {
+            if (!entry->free) {
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_XREF_OBJECT0_NOT_FREE, "read_xref_section", NULL);
+            }
+        }
     }
 
     return 0;
@@ -798,43 +838,39 @@ static int read_xref_section(pdf_context *ctx, pdf_c_stream *s, uint64_t *sectio
 static int read_xref(pdf_context *ctx, pdf_c_stream *s)
 {
     int code = 0;
-    pdf_obj **o = NULL;
-    pdf_keyword *k;
     pdf_dict *d = NULL;
-    uint64_t size = 0, max_obj = 0;
+    uint64_t max_obj = 0;
     int64_t num;
+    int obj_num;
+    bool known = false;
+
+    if (ctx->repaired)
+        return 0;
 
     do {
         uint64_t section_start, section_size;
 
-        o = ctx->stack_top;
         code = read_xref_section(ctx, s, &section_start, &section_size);
         if (code < 0)
             return code;
 
-        if (section_start + section_size > max_obj)
-            max_obj = section_start + section_size;
+        if (section_size > 0 && section_start + section_size - 1 > max_obj)
+            max_obj = section_start + section_size - 1;
 
-        if (ctx->stack_top - o > 0) {
-            k = (pdf_keyword *)ctx->stack_top[-1];
-            if(k->type != PDF_KEYWORD || k->key != TOKEN_TRAILER)
-                return_error(gs_error_syntaxerror);
-            else {
-                pdfi_pop(ctx, 1);
-                break;
-            }
-        }
-    } while (1);
+        /* code == 1 => read_xref_section ended with a trailer. */
+    } while (code != 1);
 
     code = pdfi_read_dict(ctx, ctx->main_stream, 0, 0);
     if (code < 0)
         return code;
 
     d = (pdf_dict *)ctx->stack_top[-1];
-    if (d->type != PDF_DICT) {
+    if (pdfi_type_of(d) != PDF_DICT) {
         pdfi_pop(ctx, 1);
         return_error(gs_error_typecheck);
     }
+    pdfi_countup(d);
+    pdfi_pop(ctx, 1);
 
     if (ctx->Trailer == NULL) {
         ctx->Trailer = d;
@@ -842,222 +878,184 @@ static int read_xref(pdf_context *ctx, pdf_c_stream *s)
     } else {
         code = pdfi_merge_dicts(ctx, ctx->Trailer, d);
         if (code < 0) {
-            if (code == gs_error_VMerror || ctx->args.pdfstoponerror) {
-                pdfi_pop(ctx, 1);
-                return code;
-            }
+            if (code == gs_error_VMerror || ctx->args.pdfstoponerror)
+                goto error;
         }
     }
 
-    /* We have the Trailer dictionary. First up check for hybrid files. These have the initial
-     * xref starting at 0 and size of 0. In this case the /Size entry in the trailer dictionary
-     * must tell us how large the xref is, and we need to allocate our xref table anyway.
+    /* Check if the highest subsection + size exceeds the /Size in the
+     * trailer dictionary and set a warning flag if it does
      */
-    if (ctx->xref_table == NULL && size == 0) {
-        int64_t size;
+    code = pdfi_dict_get_int(ctx, d, "Size", &num);
+    if (code < 0)
+        goto error;
 
-        code = pdfi_dict_get_int(ctx, d, "Size", &size);
-        if (code < 0) {
-            pdfi_pop(ctx, 1);
-            return code;
-        }
-        if (size < 0 || size > floor((double)ARCH_MAX_SIZE_T / (double)sizeof(xref_entry))) {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_rangecheck);
-        }
+    if (max_obj >= num)
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_XREF_SIZE, "read_xref", NULL);
 
-        ctx->xref_table = (xref_table_t *)gs_alloc_bytes(ctx->memory, sizeof(xref_table_t), "read_xref_stream allocate xref table");
-        if (ctx->xref_table == NULL) {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_VMerror);
-        }
-        memset(ctx->xref_table, 0x00, sizeof(xref_table_t));
-#if REFCNT_DEBUG
-        ctx->xref_table->UID = ctx->ref_UID++;
-        dmprintf1(ctx->memory, "Allocated xref table with UID %"PRIi64"\n", ctx->xref_table->UID);
-#endif
+    /* Check if this is a modified file and has any
+     * previous xref entries.
+     */
+    code = pdfi_dict_known(ctx, d, "Prev", &known);
+    if (known) {
+        code = pdfi_dict_get_int(ctx, d, "Prev", &num);
+        if (code < 0)
+            goto error;
 
-        ctx->xref_table->xref = (xref_entry *)gs_alloc_bytes(ctx->memory, size * sizeof(xref_entry), "read_xref_stream allocate xref table entries");
-        if (ctx->xref_table->xref == NULL){
-            pdfi_pop(ctx, 1);
-            pdfi_countdown(ctx->xref_table);
-            ctx->xref_table = NULL;
-            return_error(gs_error_VMerror);
+        if (num < 0 || num > ctx->main_stream_length) {
+            code = gs_note_error(gs_error_rangecheck);
+            goto error;
         }
 
-        memset(ctx->xref_table->xref, 0x00, size * sizeof(xref_entry));
-        ctx->xref_table->ctx = ctx;
-        ctx->xref_table->type = PDF_XREF_TABLE;
-        ctx->xref_table->xref_size = size;
-        pdfi_countup(ctx->xref_table);
+        if (pdfi_loop_detector_check_object(ctx, num) == true) {
+            code = gs_note_error(gs_error_circular_reference);
+            goto error;
+        }
+        else {
+            code = pdfi_loop_detector_add_object(ctx, num);
+            if (code < 0)
+                goto error;
+        }
+
+        code = pdfi_seek(ctx, s, num, SEEK_SET);
+        if (code < 0)
+            goto error;
+
+        if (!ctx->repaired) {
+            code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
+            if (code < 0)
+                goto error;
+
+            if (code == 0) {
+                code = gs_note_error(gs_error_syntaxerror);
+                goto error;
+            }
+        } else {
+            code = 0;
+            goto error;
+        }
+
+        if ((intptr_t)(ctx->stack_top[-1]) == (intptr_t)TOKEN_XREF) {
+            /* Read old-style xref table */
+            pdfi_pop(ctx, 1);
+            code = read_xref(ctx, ctx->main_stream);
+            if (code < 0)
+                goto error;
+        } else {
+            pdfi_pop(ctx, 1);
+            code = gs_note_error(gs_error_typecheck);
+            goto error;
+        }
     }
 
     /* Now check if this is a hybrid file. */
     if (ctx->Trailer == d) {
         code = pdfi_dict_get_int(ctx, d, "XRefStm", &num);
-        if (code < 0 && code != gs_error_undefined) {
-            pdfi_pop(ctx, 1);
-            return code;
-        }
-        if (code == 0)
+        if (code < 0 && code != gs_error_undefined)
+            goto error;
+
+        if (code == 0) {
             ctx->is_hybrid = true;
-    } else
-        code = gs_error_undefined;
 
-    if (code == 0 && ctx->prefer_xrefstm) {
-        if (ctx->args.pdfdebug)
-            dmprintf(ctx->memory, "%% File is a hybrid, containing xref table and xref stream. Using the stream.\n");
+            if (ctx->args.pdfdebug)
+                dmprintf(ctx->memory, "%% File is a hybrid, containing xref table and xref stream. Reading the stream.\n");
 
 
-        if (pdfi_loop_detector_check_object(ctx, num) == true) {
-            pdfi_pop(ctx, 1);
-            return_error(gs_error_circular_reference);
-        }
-        else {
-            code = pdfi_loop_detector_add_object(ctx, num);
-            if (code < 0) {
-                pdfi_pop(ctx, 1);
-                return code;
+            if (pdfi_loop_detector_check_object(ctx, num) == true) {
+                code = gs_note_error(gs_error_circular_reference);
+                goto error;
             }
-        }
+            else {
+                code = pdfi_loop_detector_add_object(ctx, num);
+                if (code < 0)
+                    goto error;
+            }
 
-        pdfi_loop_detector_mark(ctx);
-        /* Because of the way the code works when we read a file which is a pure
-         * xref stream file, we need to read the first integer of 'x y obj'
-         * because the xref stream decoding code expects that to be on the stack.
-         */
-        pdfi_seek(ctx, s, num, SEEK_SET);
+            code = pdfi_loop_detector_mark(ctx);
+            if (code < 0)
+                goto error;
 
-        code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-        if (code < 0) {
+            /* Because of the way the code works when we read a file which is a pure
+             * xref stream file, we need to read the first integer of 'x y obj'
+             * because the xref stream decoding code expects that to be on the stack.
+             */
+            pdfi_seek(ctx, s, num, SEEK_SET);
+
+            code = pdfi_read_bare_int(ctx, ctx->main_stream, &obj_num);
+            if (code < 0) {
+                pdfi_set_error(ctx, 0, NULL, E_PDF_BADXREFSTREAM, "read_xref", "");
+                pdfi_loop_detector_cleartomark(ctx);
+                goto error;
+            }
+
+            code = pdfi_read_xref_stream_dict(ctx, ctx->main_stream, obj_num);
+            /* We could just fall through to the exit here, but choose not to in order to avoid possible mistakes in future */
+            if (code < 0) {
+                pdfi_loop_detector_cleartomark(ctx);
+                goto error;
+            }
+
             pdfi_loop_detector_cleartomark(ctx);
-            pdfi_pop(ctx, 1);
-            return code;
-        }
-
-        code = pdfi_read_xref_stream_dict(ctx, ctx->main_stream);
-        if (code < 0) {
-            pdfi_loop_detector_cleartomark(ctx);
-            pdfi_pop(ctx, 1);
-            return code;
-        }
-
-        pdfi_loop_detector_cleartomark(ctx);
+        } else
+            code = 0;
     }
 
-    /* Not a hybrid file, so now check if this is a modified file and has
-     * previous xref entries.
-     */
-    /* But first, check if the highest subsection + size exceeds the /Size in the
-     * trailer dictionary and set a warning flag if it does
-     */
-    code = pdfi_dict_get_int(ctx, d, "Size", &num);
-    if (code < 0) {
-        pdfi_pop(ctx, 1);
-        return code;
-    }
-    if (max_obj > num)
-        pdfi_set_warning(ctx, 0, NULL, W_PDF_BAD_XREF_SIZE, "read_xref", NULL);
-
-    code = pdfi_dict_get_int(ctx, d, "Prev", &num);
-    if (code < 0) {
-        pdfi_pop(ctx, 1);
-        if (code == gs_error_undefined)
-            return 0;
-        else
-            return code;
-    }
-    pdfi_pop(ctx, 1);
-
-    if (num < 0 || num > ctx->main_stream_length)
-        return_error(gs_error_rangecheck);
-
-    if (pdfi_loop_detector_check_object(ctx, num) == true)
-        return_error(gs_error_circular_reference);
-    else {
-        code = pdfi_loop_detector_add_object(ctx, num);
-        if (code < 0)
-            return code;
-    }
-
-    code = pdfi_seek(ctx, s, num, SEEK_SET);
-    if (code < 0)
-        return code;
-
-    code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-    if (code < 0)
-        return(code);
-    if (code == 0)
-        return_error(gs_error_syntaxerror);
-
-    if (((pdf_obj *)ctx->stack_top[-1])->type == PDF_KEYWORD && ((pdf_keyword *)ctx->stack_top[-1])->key == TOKEN_XREF) {
-        /* Read old-style xref table */
-        pdfi_pop(ctx, 1);
-        return(read_xref(ctx, ctx->main_stream));
-    } else {
-        pdfi_pop(ctx, 1);
-        return_error(gs_error_typecheck);
-    }
+error:
+    pdfi_countdown(d);
+    return code;
 }
 
 int pdfi_read_xref(pdf_context *ctx)
 {
     int code = 0;
-    bool do_repair = false;
+    int obj_num;
 
     code = pdfi_loop_detector_mark(ctx);
     if (code < 0)
         return code;
 
-    if (ctx->startxref != 0) {
-        code = pdfi_loop_detector_add_object(ctx, ctx->startxref);
-        if (code < 0)
-            goto exit;
+    if (ctx->startxref == 0)
+        goto repair;
 
-        if (ctx->args.pdfdebug)
-            dmprintf(ctx->memory, "%% Trying to read 'xref' token for xref table, or 'int int obj' for an xref stream\n");
-
-        if (ctx->startxref > ctx->main_stream_length - 5) {
-            pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTARTXREF, "pdfi_read_xref", (char *)"startxref offset is beyond end of file");
-            do_repair = true;
-            goto exit;
-        }
-
-
-        /* Read the xref(s) */
-        pdfi_seek(ctx, ctx->main_stream, ctx->startxref, SEEK_SET);
-
-        code = pdfi_read_token(ctx, ctx->main_stream, 0, 0);
-        if (code < 0) {
-            pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTARTXREF, "pdfi_read_xref", (char *)"Failed to read any token at the startxref location");
-            do_repair = true;
-            goto exit;
-        }
-
-        if (pdfi_count_stack(ctx) < 1) {
-            code = gs_note_error(gs_error_undefined);
-            goto exit;
-        }
-
-        if (((pdf_obj *)ctx->stack_top[-1])->type == PDF_KEYWORD && ((pdf_keyword *)ctx->stack_top[-1])->key == TOKEN_XREF) {
-            /* Read old-style xref table */
-            pdfi_pop(ctx, 1);
-            code = read_xref(ctx, ctx->main_stream);
-            if (code < 0) {
-                do_repair = true;
-                goto exit;
-            }
-        } else {
-            code = pdfi_read_xref_stream_dict(ctx, ctx->main_stream);
-            if (code < 0){
-                do_repair = true;
-                goto exit;
-            }
-        }
-    } else {
-        /* Attempt to repair PDF file */
-        do_repair = true;
+    code = pdfi_loop_detector_add_object(ctx, ctx->startxref);
+    if (code < 0)
         goto exit;
+
+    if (ctx->args.pdfdebug)
+        dmprintf(ctx->memory, "%% Trying to read 'xref' token for xref table, or 'int int obj' for an xref stream\n");
+
+    if (ctx->startxref > ctx->main_stream_length - 5) {
+        pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTARTXREF, "pdfi_read_xref", (char *)"startxref offset is beyond end of file");
+        goto repair;
+    }
+    if (ctx->startxref < 0) {
+        pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTARTXREF, "pdfi_read_xref", (char *)"startxref offset is before start of file");
+        goto repair;
+    }
+
+    /* Read the xref(s) */
+    pdfi_seek(ctx, ctx->main_stream, ctx->startxref, SEEK_SET);
+
+    /* If it starts with an int, it's an xref stream dict */
+    code = pdfi_read_bare_int(ctx, ctx->main_stream, &obj_num);
+    if (code == 1) {
+        if (pdfi_check_xref_stream(ctx)) {
+            code = pdfi_read_xref_stream_dict(ctx, ctx->main_stream, obj_num);
+            if (code < 0)
+                goto repair;
+        } else
+            goto repair;
+    } else {
+        /* If not, it had better start 'xref', and be an old-style xref table */
+        code = pdfi_read_bare_keyword(ctx, ctx->main_stream);
+        if (code != TOKEN_XREF) {
+            pdfi_set_error(ctx, 0, NULL, E_PDF_BADSTARTXREF, "pdfi_read_xref", (char *)"Failed to read any token at the startxref location");
+            goto repair;
+        }
+
+        code = read_xref(ctx, ctx->main_stream);
+        if (code < 0)
+            goto repair;
     }
 
     if(ctx->args.pdfdebug && ctx->xref_table) {
@@ -1070,21 +1068,21 @@ int pdfi_read_xref(pdf_context *ctx)
             entry = &ctx->xref_table->xref[i];
             if(entry->compressed) {
                 dmprintf(ctx->memory, "*");
-                gs_sprintf(Buffer, "%"PRId64"", entry->object_num);
+                gs_snprintf(Buffer, sizeof(Buffer), "%"PRId64"", entry->object_num);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
                 }
                 dmprintf1(ctx->memory, "%s ", Buffer);
 
-                gs_sprintf(Buffer, "%ld", entry->u.compressed.compressed_stream_num);
+                gs_snprintf(Buffer, sizeof(Buffer), "%ld", entry->u.compressed.compressed_stream_num);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
                 }
                 dmprintf1(ctx->memory, "%s ", Buffer);
 
-                gs_sprintf(Buffer, "%ld", entry->u.compressed.object_index);
+                gs_snprintf(Buffer, sizeof(Buffer), "%ld", entry->u.compressed.object_index);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
@@ -1094,21 +1092,21 @@ int pdfi_read_xref(pdf_context *ctx)
             else {
                 dmprintf(ctx->memory, " ");
 
-                gs_sprintf(Buffer, "%ld", entry->object_num);
+                gs_snprintf(Buffer, sizeof(Buffer), "%ld", entry->object_num);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
                 }
                 dmprintf1(ctx->memory, "%s ", Buffer);
 
-                gs_sprintf(Buffer, "%"PRIdOFFSET"", entry->u.uncompressed.offset);
+                gs_snprintf(Buffer, sizeof(Buffer), "%"PRIdOFFSET"", entry->u.uncompressed.offset);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
                 }
                 dmprintf1(ctx->memory, "%s ", Buffer);
 
-                gs_sprintf(Buffer, "%ld", entry->u.uncompressed.generation_num);
+                gs_snprintf(Buffer, sizeof(Buffer), "%ld", entry->u.uncompressed.generation_num);
                 j = 10 - strlen(Buffer);
                 while(j--) {
                     dmprintf(ctx->memory, " ");
@@ -1126,11 +1124,15 @@ int pdfi_read_xref(pdf_context *ctx)
 
  exit:
     (void)pdfi_loop_detector_cleartomark(ctx);
-    if (do_repair)
-        return(pdfi_repair_file(ctx));
 
     if (code < 0)
         return code;
 
+    return 0;
+
+repair:
+    (void)pdfi_loop_detector_cleartomark(ctx);
+    if (!ctx->repaired)
+        return(pdfi_repair_file(ctx));
     return 0;
 }

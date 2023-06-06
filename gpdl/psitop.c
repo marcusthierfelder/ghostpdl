@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* psitop.c */
@@ -331,7 +331,7 @@ ps_impl_allocate_interp_instance(pl_interp_implementation_t *impl, gs_memory_t *
     /* We start gs with the nullpage device, and replace the device with the
      * set_device call from the language independent code.
      */
-    gsargs[nargs++] = "-dNODISPLAY";
+    gsargs[nargs++] = "-sDEVICE=nullpage";
     /* As we're "printer targetted, use a jobserver */
     gsargs[nargs++] = "-dJOBSERVER";
 
@@ -343,6 +343,13 @@ ps_impl_allocate_interp_instance(pl_interp_implementation_t *impl, gs_memory_t *
         gs_free_object(mem, psi, "ps_impl_allocate_interp_instance");
         return code;
     }
+
+    /* The above call to psapi_new_instance will have set the ps interpreter
+     * to expect 'local' encoding. When running under PL, this means we'll
+     * end up decoding the input stuff to utf8, and then feed that into the
+     * gs instance, where it will decode it again! Avoid this, by setting
+     * gs to expect UTF8 input. */
+    psapi_set_arg_encoding(psi->psapi_instance, PS_ARG_ENCODING_UTF8);
 
     impl->interp_client_data = psi;
 
@@ -434,16 +441,17 @@ ps_impl_init_job(pl_interp_implementation_t *impl,
         gs_param_list_set_persistent_keys((gs_param_list*)params, false);
 
         code2 = param_write_int((gs_param_list*)params, "PageSpotColors", &(page_spot_colors));
-        if (code2 < 0)
+        if (code2 < 0) {
+            gs_c_param_list_free(psi->memory, params, "ps_impl_init_job");
             return code2;
+        }
 
         gs_c_param_list_read(params);
 
         code2 = psapi_set_device_param(psi->psapi_instance, (gs_param_list*)params);
+        gs_c_param_list_free(psi->memory, params, "ps_impl_init_job");
         if (code2 < 0)
             return code2;
-
-        gs_c_param_list_release(params);
     }
     return code;
 }

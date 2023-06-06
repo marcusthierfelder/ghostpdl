@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -382,6 +382,8 @@ pdf_add_ToUnicode(gx_device_pdf *pdev, gs_font *font, pdf_font_resource_t *pdfon
 
         if (!unicode) {
             unicode = (ushort *)gs_alloc_bytes(pdev->memory, length * sizeof(short), "temporary Unicode array");
+            if (unicode == NULL)
+                return_error(gs_error_VMerror);
             length = font->procs.decode_glyph((gs_font *)font, glyph, ch, unicode, length);
         }
 
@@ -485,14 +487,14 @@ pdf_encode_string_element(gx_device_pdf *pdev, gs_font *font, pdf_font_resource_
                            : *gdata);
     if (glyph == GS_NO_GLYPH || glyph == pet->glyph) {
         if((pdfont->cmap_ToUnicode == NULL || !gs_cmap_ToUnicode_check_pair(pdfont->cmap_ToUnicode, ch)) && pdev->UseOCR != UseOCRNever)
-            (void)pdf_add_ToUnicode(pdev, font, pdfont, glyph, ch, &gnstr);
+            (void)pdf_add_ToUnicode(pdev, font, pdfont, glyph, ch, NULL);
         return 0;
     }
     if (pet->glyph != GS_NO_GLYPH) { /* encoding conflict */
         return_error(gs_error_rangecheck);
         /* Must not happen because pdf_obtain_font_resource
-            * checks for encoding compatibility.
-            */
+         * checks for encoding compatibility.
+         */
     }
     code = font->procs.glyph_name(font, glyph, &gnstr);
     if (code < 0)
@@ -553,7 +555,7 @@ pdf_encode_string_element(gx_device_pdf *pdev, gs_font *font, pdf_font_resource_
         } else if (pdfont->base_font == NULL && ccfont != NULL &&
                 (gs_copy_glyph_options(font, glyph, (gs_font *)ccfont, COPY_GLYPH_NO_NEW) != 1 ||
                     gs_copied_font_add_encoding((gs_font *)ccfont, ch, glyph) < 0)) {
-            /*
+               /*
                 * The "complete" copy of the font appears incomplete
                 * due to incrementally added glyphs. Drop the "complete"
                 * copy now and continue with subset font only.
@@ -566,7 +568,7 @@ pdf_encode_string_element(gx_device_pdf *pdev, gs_font *font, pdf_font_resource_
                 * We also check whether the encoding is compatible.
                 * It must be compatible here due to the pdf_obtain_font_resource
                 * and ccfont logics, but we want to ensure for safety reason.
-                    */
+                */
             ccfont = NULL;
             pdf_font_descriptor_drop_complete_font(pdfont->FontDescriptor);
         }
@@ -584,10 +586,10 @@ pdf_encode_string_element(gx_device_pdf *pdev, gs_font *font, pdf_font_resource_
         pdfont->used[ch >> 3] |= 0x80 >> (ch & 7);
     }
     /*
-        * We always generate ToUnicode for simple fonts, because
-        * we can't detemine in advance, which glyphs the font actually uses.
-        * The decision about writing it out is deferred until pdf_write_font_resource.
-        */
+     * We always generate ToUnicode for simple fonts, because
+     * we can't detemine in advance, which glyphs the font actually uses.
+     * The decision about writing it out is deferred until pdf_write_font_resource.
+     */
     code = pdf_add_ToUnicode(pdev, font, pdfont, glyph, ch, &gnstr);
     if(code < 0)
         return code;
@@ -724,7 +726,10 @@ process_text_estimate_bbox(pdf_text_enum_t *pte, gs_font_base *font,
                 return code;
         }
         if (pte->text.operation & TEXT_REPLACE_WIDTHS) {
-            gs_text_replaced_width(&pte->text, xy_index++, &tpt);
+            code = gs_text_replaced_width(&pte->text, xy_index++, &tpt);
+            if (code < 0)
+                return code;
+
             gs_distance_transform(tpt.x, tpt.y, &ctm_only(pte->pgs), &wanted);
         } else {
             gs_distance_transform(info.width[WMode].x,
@@ -866,6 +871,7 @@ pdf_process_string(pdf_text_enum_t *penum, gs_string *pstr,
                 if (rect.p.x > rect.q.x || rect.p.y > rect.q.y) {
                     penum->index += pstr->size;
                     text->operation &= ~TEXT_DO_DRAW;
+                    penum->text_clipped = true;
                 }
             }
         } else {

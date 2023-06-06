@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -81,7 +81,7 @@ color_halftone_callback(cal_halftone_data_t *ht, void *arg)
     gx_color_index dev_white = gx_device_white(dev);
     gx_color_index dev_black = gx_device_black(dev);
 
-    if (dev->is_planar) {
+    if (dev->num_planar_planes) {
         (*dev_proc(dev, copy_planes)) (dev, ht->data, ht->x + (ht->offset_x<<3), ht->raster,
             gx_no_bitmap_id, ht->x, ht->y, ht->w, ht->h,
             ht->plane_raster);
@@ -289,7 +289,7 @@ gs_image_class_4_color(gx_image_enum * penum, irender_proc_t *render_fn)
            then we will may use the thresholding if it is a halftone
            device IFF we have one bit per component */
         if ((bpc == 1) && transfer_is_monotonic &&
-            (penum->dev->color_info.num_components == 1 || penum->dev->is_planar) &&
+            (penum->dev->color_info.num_components == 1 || penum->dev->num_planar_planes > 1) &&
             penum->bps == 8) {
 #ifdef WITH_CAL
             penum->cal_ht = color_halftone_init(penum);

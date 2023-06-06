@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -38,6 +38,8 @@
 #include "gsicc_manage.h"
 #include "gsform1.h"
 #include "gxpath.h"
+
+extern_st(st_gs_gstate);
 
 /* Forward references */
 static image_enum_proc_plane_data(pdf_image_plane_data);
@@ -381,6 +383,7 @@ static int setup_type3_image(gx_device_pdf *pdev, const gs_gstate * pgs,
             gs_matrix_scale(&pim3a.ImageMatrix, 1, 1.0 / sy, &pim3a.ImageMatrix);
         }
         gs_matrix_multiply(&mi, &pim3a.MaskDict.ImageMatrix, &pim3a.MaskDict.ImageMatrix);
+        pim3a.imagematrices_are_untrustworthy = 1;
         pic1 = (gs_image_common_t *)&pim3a;
         /* Setting pdev->converting_image_matrix to communicate with pdf_image3_make_mcde. */
         gs_matrix_multiply(&mi, &ctm_only(pgs), &pdev->converting_image_matrix);
@@ -1769,8 +1772,10 @@ pdf_image_plane_data_alt(gx_image_enum_common_t * info,
                     if (flipped_count == 0)
                         flipped_count = block_bytes * nplanes;
                 }
-                image_flip_planes(row, bit_planes, offset, flip_count,
-                                  nplanes, pie->plane_depths[0]);
+                status = image_flip_planes(row, bit_planes, offset, flip_count,
+                                           nplanes, pie->plane_depths[0]);
+                if (status < 0)
+                    break;
                 status = sputs(pie->writer.binary[alt_writer_index].strm, row,
                                flipped_count, &ignore);
                 if (status < 0)
@@ -1872,7 +1877,7 @@ use_image_as_pattern(gx_device_pdf *pdev, pdf_resource_t *pres1,
     }
     if (code >= 0)
         code = (*dev_proc(pdev, dev_spec_op))((gx_device *)pdev,
-            gxdso_pattern_load, &inst, id);
+            gxdso_pattern_load, &id, sizeof(gs_id));
     if (code >= 0) {
         stream_puts(pdev->strm, "q ");
         code = pdf_cs_Pattern_colored(pdev, &v);
@@ -1909,8 +1914,29 @@ static int
 pdf_end_and_do_image(gx_device_pdf *pdev, pdf_image_writer *piw,
                      const gs_matrix *mat, gs_id ps_bitmap_id, pdf_image_usage_t do_image)
 {
-    int code = pdf_end_write_image(pdev, piw);
-    pdf_resource_t *pres = piw->pres;
+    int code = 0;
+    pdf_resource_t *pres = NULL;
+
+    /* In order to identify duplicated images which use the same SMask we must
+     * add the SMask entry to the image dictionary before we call pdf_end_write_image
+     * because that will hash the dictionaries and streams. If we haven't already
+     * added the SMask then the hash will not match any existing image which uses an SMask.
+     */
+    if (do_image == USE_AS_IMAGE) {
+        if (pdev->image_mask_id != gs_no_id && piw->pres && piw->pres->object) {
+            char buf[20];
+
+            gs_snprintf(buf, sizeof(buf), "%ld 0 R", pdev->image_mask_id);
+            code = cos_dict_put_string_copy((cos_dict_t *)piw->pres->object,
+                    pdev->image_mask_is_SMask ? "/SMask" : "/Mask", buf);
+            (*(piw->pres->object)).md5_valid = 0;
+            if (code < 0)
+                return code;
+        }
+    }
+
+    code = pdf_end_write_image(pdev, piw);
+    pres = piw->pres;
 
     switch (code) {
     default:
@@ -1920,16 +1946,6 @@ pdf_end_and_do_image(gx_device_pdf *pdev, pdf_image_writer *piw,
         break;
     case 0:
         if (do_image == USE_AS_IMAGE) {
-            if (pdev->image_mask_id != gs_no_id) {
-                char buf[20];
-
-                gs_sprintf(buf, "%ld 0 R", pdev->image_mask_id);
-                code = cos_dict_put_string_copy((cos_dict_t *)pres->object,
-                        pdev->image_mask_is_SMask ? "/SMask" : "/Mask", buf);
-                (*(pres->object)).md5_valid = 0;
-                if (code < 0)
-                    return code;
-            }
             if (pdev->image_mask_skip)
                 code = 0;
             else
@@ -2032,7 +2048,7 @@ pdf_image_end_image(gx_image_enum_common_t * info, bool draw_last)
 static int
 pdf_image_end_image_cvd(gx_image_enum_common_t * info, bool draw_last)
 {   pdf_lcvd_t *cvd = (pdf_lcvd_t *)info->dev;
-    int code = pdf_dump_converted_image(cvd->pdev, cvd);
+    int code = pdf_dump_converted_image(cvd->pdev, cvd, 0);
     int code1 = gx_image1_end_image(info, draw_last);
     int code2 = gs_closedevice((gx_device *)cvd->mask);
     int code3 = gs_closedevice((gx_device *)cvd);
@@ -2145,6 +2161,8 @@ pdf_image3_make_mcde(gx_device *dev, const gs_gstate *pgs,
         cvd->m = pdev->converting_image_matrix;
         cvd->mdev.mapped_x = origin->x;
         cvd->mdev.mapped_y = origin->y;
+        cvd->mdev.width += origin->x;
+        cvd->mdev.height += origin->y;
         *pmcdev = (gx_device *)&cvd->mdev;
         code = gx_default_begin_typed_image
             ((gx_device *)&cvd->mdev, pgs, pmat, pic, prect, pdcolor, NULL, mem,
@@ -2214,8 +2232,10 @@ pdf_image3x_make_mcde(gx_device *dev, const gs_gstate *pgs,
     code = pdf_begin_typed_image
         ((gx_device_pdf *)dev, pgs, pmat, pic, prect, pdcolor, pcpath, mem,
          pinfo, PDF_IMAGE_TYPE3_DATA);
-    if (code < 0)
+    if (code < 0) {
+        rc_decrement(*pmcdev, "pdf_image3x_make_mcde");
         return code;
+    }
     if ((*pinfo)->procs != &pdf_image_enum_procs) {
         /* We couldn't handle the image.  Bail out. */
         gx_image_end(*pinfo, false);
@@ -2695,7 +2715,6 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                 gs_pattern1_instance_t *pinst = param->pinst;
                 gs_gstate *pgs = param->graphics_state;
 
-                id = param->pinst_id;
                 code = pdf_check_soft_mask(pdev, (gs_gstate *)pgs);
                 if (code < 0)
                     return code;
@@ -2711,7 +2730,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                     int pdepth = 0;
 
                     while (pdev->initial_pattern_states[pdepth] != 0x00) {
-                        gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdepth], "Freeing dangling pattern state");
+                        gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdepth], "Freeing dangling pattern state");
                         pdev->initial_pattern_states[pdepth] = NULL;
                         pdepth++;
                     }
@@ -2729,16 +2748,17 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                     gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states, "Freeing old pattern state stack");
                     pdev->initial_pattern_states = new_states;
                 }
-                pdev->initial_pattern_states[pdev->PatternDepth] = (gs_gstate *)gs_alloc_bytes(pdev->pdf_memory->non_gc_memory, sizeof(gs_gstate), "pattern initial graphics state");
+                pdev->initial_pattern_states[pdev->PatternDepth] = (gs_gstate *)gs_alloc_struct(pdev->pdf_memory, gs_gstate, &st_gs_gstate, "gdev_pdf_dev_spec_op");
                 if (pdev->initial_pattern_states[pdev->PatternDepth] == NULL)
                     return code;
                 memset(pdev->initial_pattern_states[pdev->PatternDepth], 0x00, sizeof(gs_gstate));
+                pdev->initial_pattern_states[pdev->PatternDepth]->memory = pdev->pdf_memory;
 
                 reset_gstate_for_pattern(pdev, pdev->initial_pattern_states[pdev->PatternDepth], pgs);
-                code = pdf_enter_substream(pdev, resourcePattern, id, &pres, false,
+                code = pdf_enter_substream(pdev, resourcePattern, pinst->id, &pres, false,
                         pdev->CompressStreams);
                 if (code < 0) {
-                    gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                    gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                     pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                     return code;
                 }
@@ -2751,10 +2771,10 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                  * the ID is restored when we finish capturing the pattern.
                  */
                 pdev->state.soft_mask_id = pgs->soft_mask_id;
-                pres->rid = id;
+                pres->rid = pinst->id;
                 code = pdf_store_pattern1_params(pdev, pres, pinst);
                 if (code < 0) {
-                    gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                    gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                     pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                     return code;
                 }
@@ -2778,7 +2798,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                     }
                     code = pdf_add_procsets(pdev->substream_Resources, pdev->procsets);
                     if (code < 0) {
-                        gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                        gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                         pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                         return code;
                     }
@@ -2786,7 +2806,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                 pres = pres1 = pdev->accumulating_substream_resource;
                 code = pdf_exit_substream(pdev);
                 if (code < 0) {
-                    gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                    gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                     pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                     return code;
                 }
@@ -2798,7 +2818,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                 }
                 code = pdf_find_same_resource(pdev, resourcePattern, &pres, check_unsubstituted2);
                 if (code < 0) {
-                    gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                    gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                     pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                     return code;
                 }
@@ -2807,7 +2827,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
 
                     code = pdf_cancel_resource(pdev, pres1, resourcePattern);
                     if (code < 0) {
-                        gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
+                        gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth], "Freeing dangling pattern state");
                         pdev->initial_pattern_states[pdev->PatternDepth] = NULL;
                         return code;
                     }
@@ -2818,7 +2838,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
                 } else if (pres->object->id < 0)
                     pdf_reserve_object_id(pdev, pres, 0);
                 reset_gstate_for_pattern(pdev, pgs, pdev->initial_pattern_states[pdev->PatternDepth - 1]);
-                gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states[pdev->PatternDepth - 1], "Freeing dangling pattern state");
+                gs_free_object(pdev->pdf_memory, pdev->initial_pattern_states[pdev->PatternDepth - 1], "Freeing dangling pattern state");
                 pdev->initial_pattern_states[pdev->PatternDepth - 1] = NULL;
                 if (pdev->PatternDepth == 1) {
                     gs_free_object(pdev->pdf_memory->non_gc_memory, pdev->initial_pattern_states, "Freeing dangling pattern state");
@@ -2830,7 +2850,7 @@ gdev_pdf_dev_spec_op(gx_device *pdev1, int dev_spec_op, void *data, int size)
             }
             return 1;
         case gxdso_pattern_load:
-            pres = pdf_find_resource_by_gs_id(pdev, resourcePattern, id);
+            pres = pdf_find_resource_by_gs_id(pdev, resourcePattern, *((gx_bitmap_id *)data));
             if (pres == 0)
                 return 0;
             pres = pdf_substitute_pattern(pres);

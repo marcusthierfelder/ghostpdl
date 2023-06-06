@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -189,7 +189,7 @@ check_resident_ufst_fonts(pl_dict_t * pfontdict,
                                 NULL) /* return data ignored */ )
                 dmprintf2(mem,
                           "%s not available in font dictionary, resident table position: %d\n",
-                          pl_built_in_resident_font_table[j].full_font_name, j);
+                          (char *)pl_built_in_resident_font_table[j].full_font_name, j);
         }
     }
     return;
@@ -358,6 +358,7 @@ pl_load_ufst_lineprinter(gs_memory_t * mem, pl_dict_t * pfontdict,
     return 0;
 }
 
+
 static int
 pl_load_built_in_mtype_fonts(const char *pathname, gs_memory_t * mem,
                              pl_dict_t * pfontdict, gs_font_dir * pdir,
@@ -366,7 +367,7 @@ pl_load_built_in_mtype_fonts(const char *pathname, gs_memory_t * mem,
     int i, k;
     short status = 0;
     int bSize;
-    byte key[3];
+    byte key[3] = {0};
     char pthnm[1024];
     char *ufst_root_dir;
     char *fco;

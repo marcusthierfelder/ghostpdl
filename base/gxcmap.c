@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -1361,6 +1361,11 @@ cmap_separation_halftoned(frac all, gx_device_color * pdc,
         for (i = 0; i < pgs->color_component_map.num_colorants; i++)
             cm_comps[i] = comp_value;
     } else {
+        if (pgs->color_component_map.sep_type == SEP_NONE) {
+            color_set_null(pdc);
+            return;
+        }
+
         /* map to the color model */
         map_components_to_colorants(&all, &(pgs->color_component_map), cm_comps,
             pgs->color_component_map.num_colorants);
@@ -1427,8 +1432,12 @@ cmap_separation_direct(frac all, gx_device_color * pdc, const gs_gstate * pgs,
         if (des_profile->data_cs == gsCIELAB || des_profile->islab) {
             use_rgb2dev_icc = true;
         }
-    }
-    else {
+    } else {
+        if (pgs->color_component_map.sep_type == SEP_NONE) {
+            color_set_null(pdc);
+            return;
+        }
+
         /* map to the color model */
         map_components_to_colorants(&comp_value, &(pgs->color_component_map), cm_comps,
             pgs->color_component_map.num_colorants);
@@ -1437,7 +1446,7 @@ cmap_separation_direct(frac all, gx_device_color * pdc, const gs_gstate * pgs,
     /* Check if we have the standard colorants.  If yes, then we will apply
       ICC color management to those colorants. */
     if (devicen_has_cmyk(dev, des_profile) && des_profile->data_cs == gsCMYK &&
-        !named_color_supported(pgs)) {
+        !named_color_supported(pgs) && pgs->color_component_map.sep_type != SEP_ALL) {
         /* We need to do a CMYK to CMYK conversion here.  This will always
            use the default CMYK profile and the device's output profile.
            We probably need to add some checking here
@@ -1498,6 +1507,16 @@ cmap_separation_direct(frac all, gx_device_color * pdc, const gs_gstate * pgs,
         for (i = 0; i < ncomps; i++)
             pdc->colors.devn.values[i] = cv[i];
         pdc->type = gx_dc_type_devn;
+
+        /* Let device set the tags if present */
+        if (device_encodes_tags(dev)) {
+	        const gx_device *cmdev;
+	        const gx_cm_color_map_procs *cmprocs;
+
+            cmprocs = dev_proc(dev, get_color_mapping_procs)(dev, &cmdev);
+            cmprocs->map_cmyk(cmdev, 0, 0, 0, 0, cm_comps);
+            pdc->colors.devn.values[ncomps - 1] = frac2cv(cm_comps[ncomps - 1]);
+        }
         return;
     }
 
@@ -1531,6 +1550,11 @@ cmap_devicen_halftoned(const frac * pcc,
     gsicc_rendering_param_t render_cond;
     cmm_dev_profile_t *dev_profile = NULL;
     cmm_profile_t *des_profile = NULL;
+
+    if (pcs->params.device_n.all_none == true) {
+        color_set_null(pdc);
+        return;
+    }
 
     dev_proc(dev, get_profile)(dev,  &dev_profile);
     gsicc_extract_profile(dev->graphics_type_tag,
@@ -1578,6 +1602,11 @@ cmap_devicen_direct(const frac * pcc,
     gsicc_rendering_param_t render_cond;
     cmm_dev_profile_t *dev_profile = NULL;
     cmm_profile_t *des_profile = NULL;
+
+    if (pcs->params.device_n.all_none == true) {
+        color_set_null(pdc);
+        return;
+    }
 
     dev_proc(dev, get_profile)(dev,  &dev_profile);
     gsicc_extract_profile(dev->graphics_type_tag,
@@ -1628,6 +1657,17 @@ cmap_devicen_direct(const frac * pcc,
                 pdc->colors.devn.values[i] = frac2cv(frac_1 - gx_map_color_frac(pgs,
                             (frac)(frac_1 - cm_comps[i]), effective_transfer[i]));
         pdc->type = gx_dc_type_devn;
+
+        /* Let device set the tags if present */
+        if (device_encodes_tags(dev)) {
+	        const gx_device *cmdev;
+	        const gx_cm_color_map_procs *cmprocs;
+
+            cmprocs = dev_proc(dev, get_color_mapping_procs)(dev, &cmdev);
+            cmprocs->map_cmyk(cmdev, 0, 0, 0, 0, cm_comps);
+            pdc->colors.devn.values[ncomps - 1] = frac2cv(cm_comps[ncomps - 1]);
+        }
+
         return;
     }
 
@@ -1763,7 +1803,7 @@ gx_default_w_b_mono_encode_color(gx_device *dev, const gx_color_value cv[])
 
 int
 gx_default_w_b_mono_decode_color(gx_device * dev, gx_color_index color,
-                                 gx_color_value pgray[1])
+                                 gx_color_value pgray[])
 {				/* Map 0 to max_value, 1 to 0. */
     pgray[0] = -(gx_color_value) color;
     return 0;
@@ -1799,7 +1839,7 @@ gx_default_b_w_mono_encode_color(gx_device *dev, const gx_color_value cv[])
 
 int
 gx_default_b_w_mono_decode_color(gx_device * dev, gx_color_index color,
-                                 gx_color_value pgray[1])
+                                 gx_color_value pgray[])
 {				/* Map 0 to max_value, 1 to 0. */
     pgray[0] = -((gx_color_value) color ^ 1);
     return 0;
@@ -1864,7 +1904,7 @@ gx_default_8bit_map_gray_color(gx_device * dev, const gx_color_value cv[])
 
 int
 gx_default_8bit_map_color_gray(gx_device * dev, gx_color_index color,
-                              gx_color_value pgray[1])
+                              gx_color_value pgray[])
 {
     pgray[0] = (gx_color_value)(color * gx_max_color_value / 255);
     return 0;
@@ -1956,7 +1996,7 @@ cmyk_1bit_map_color_rgb(gx_device * dev, gx_color_index color,
 
 int
 cmyk_1bit_map_color_cmyk(gx_device * dev, gx_color_index color,
-                        gx_color_value pcv[4])
+                        gx_color_value pcv[])
 {
     pcv[0] = (color & 8 ? 0 : gx_max_color_value);
     pcv[1] = (color & 4 ? 0 : gx_max_color_value);
@@ -2012,7 +2052,7 @@ cmyk_8bit_map_color_rgb(gx_device * dev, gx_color_index color,
 
 int
 cmyk_8bit_map_color_cmyk(gx_device * dev, gx_color_index color,
-                        gx_color_value pcv[4])
+                        gx_color_value pcv[])
 {
     pcv[0] = gx_color_value_from_byte((color >> 24) & 0xff);
     pcv[1] = gx_color_value_from_byte((color >> 16) & 0xff);
@@ -2023,7 +2063,7 @@ cmyk_8bit_map_color_cmyk(gx_device * dev, gx_color_index color,
 
 int
 cmyk_16bit_map_color_cmyk(gx_device * dev, gx_color_index color,
-                          gx_color_value pcv[4])
+                          gx_color_value pcv[])
 {
     pcv[0] = ((color >> 24) >> 24) & 0xffff;
     pcv[1] = ((color >> 16) >> 16) & 0xffff;

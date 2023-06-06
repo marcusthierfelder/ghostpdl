@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -92,16 +92,26 @@ void
 gx_cpath_accum_set_cbox(gx_device_cpath_accum * padev,
                         const gs_fixed_rect * pbox)
 {
+    /* fixed2int_var_ceiling(x) overflows for anything larger
+     * than max_fixed - fixed_scale - 1. So to protect against
+     * us doing bad things when passed a min_fixed/max_fixed box,
+     * clip appropriately. */
+    fixed upperx = pbox->q.x;
+    fixed uppery = pbox->q.y;
+    if (upperx > max_fixed - fixed_scale - 1)
+        upperx = max_fixed - fixed_scale - 1;
+    if (uppery > max_fixed - fixed_scale - 1)
+        uppery = max_fixed - fixed_scale - 1;
     if (padev->list.transpose) {
         padev->clip_box.p.x = fixed2int_var(pbox->p.y);
         padev->clip_box.p.y = fixed2int_var(pbox->p.x);
-        padev->clip_box.q.x = fixed2int_var_ceiling(pbox->q.y);
-        padev->clip_box.q.y = fixed2int_var_ceiling(pbox->q.x);
+        padev->clip_box.q.x = fixed2int_var_ceiling(uppery);
+        padev->clip_box.q.y = fixed2int_var_ceiling(upperx);
     } else {
         padev->clip_box.p.x = fixed2int_var(pbox->p.x);
         padev->clip_box.p.y = fixed2int_var(pbox->p.y);
-        padev->clip_box.q.x = fixed2int_var_ceiling(pbox->q.x);
-        padev->clip_box.q.y = fixed2int_var_ceiling(pbox->q.y);
+        padev->clip_box.q.x = fixed2int_var_ceiling(upperx);
+        padev->clip_box.q.y = fixed2int_var_ceiling(uppery);
     }
 }
 
@@ -256,10 +266,10 @@ accum_open_device(register gx_device * dev)
     gx_device_cpath_accum * const adev = (gx_device_cpath_accum *)dev;
 
     gx_clip_list_init(&adev->list);
-    adev->bbox.p.x = adev->bbox.p.y = max_int;
-    adev->bbox.q.x = adev->bbox.q.y = min_int;
-    adev->clip_box.p.x = adev->clip_box.p.y = min_int;
-    adev->clip_box.q.x = adev->clip_box.q.y = max_int;
+    adev->bbox.p.x = adev->bbox.p.y = fixed2int(max_fixed);
+    adev->bbox.q.x = adev->bbox.q.y = fixed2int(min_fixed);
+    adev->clip_box.p.x = adev->clip_box.p.y = fixed2int(min_fixed);
+    adev->clip_box.q.x = adev->clip_box.q.y = fixed2int(max_fixed);
     return 0;
 }
 

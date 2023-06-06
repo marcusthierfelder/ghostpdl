@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /*$Id: gdevtxtw.c 7795 2007-03-23 13:56:11Z tim $ */
@@ -209,6 +209,7 @@ txtwrite_open_device(gx_device * dev)
     dev->color_info.separable_and_linear = GX_CINFO_SEP_LIN;
     set_linear_color_bits_mask_shift(dev);
     dev->interpolate_control = 0;
+    dev->non_strict_bounds = 0;
 
     code = install_internal_subclass_devices((gx_device **)&dev, NULL);
     return code;
@@ -647,20 +648,20 @@ static int simple_text_output(gx_device_txtwrite_t *tdev)
     return 0;
 }
 
-static int escaped_Unicode (unsigned short Unicode, char *Buf)
+static int escaped_Unicode (unsigned short Unicode, char Buf[32])
 {
     switch (Unicode)
     {
-    case 0x3C: gs_sprintf(Buf, "&lt;"); break;
-    case 0x3E: gs_sprintf(Buf, "&gt;"); break;
-    case 0x26: gs_sprintf(Buf, "&amp;"); break;
-    case 0x22: gs_sprintf(Buf, "&quot;"); break;
-    case 0x27: gs_sprintf(Buf, "&apos;"); break;
+    case 0x3C: gs_snprintf(Buf, 32, "&lt;"); break;
+    case 0x3E: gs_snprintf(Buf, 32, "&gt;"); break;
+    case 0x26: gs_snprintf(Buf, 32, "&amp;"); break;
+    case 0x22: gs_snprintf(Buf, 32, "&quot;"); break;
+    case 0x27: gs_snprintf(Buf, 32, "&apos;"); break;
     default:
         if (Unicode >= 32 && Unicode <= 127)
-            gs_sprintf(Buf, "%c", Unicode);
+            gs_snprintf(Buf, 32, "%c", Unicode);
         else
-            gs_sprintf(Buf, "&#x%x;", Unicode);
+            gs_snprintf(Buf, 32, "&#x%x;", Unicode);
         break;
     }
 
@@ -683,13 +684,13 @@ static int decorated_text_output(gx_device_txtwrite_t *tdev)
         x_entry = tdev->PageData.unsorted_text_list;
         while (x_entry) {
             next_x = x_entry->next;
-            gs_sprintf(TextBuffer, "<span bbox=\"%0.0f %0.0f %0.0f %0.0f\" font=\"%s\" size=\"%0.4f\">\n", x_entry->start.x, x_entry->start.y,
+            gs_snprintf(TextBuffer, sizeof(TextBuffer), "<span bbox=\"%0.0f %0.0f %0.0f %0.0f\" font=\"%s\" size=\"%0.4f\">\n", x_entry->start.x, x_entry->start.y,
                 x_entry->end.x, x_entry->end.y, x_entry->FontName,x_entry->size);
             gp_fwrite(TextBuffer, 1, strlen(TextBuffer), tdev->file);
             xpos = x_entry->start.x;
             for (i=0;i<x_entry->Unicode_Text_Size;i++) {
-                escaped_Unicode(x_entry->Unicode_Text[i], (char *)&Escaped);
-                gs_sprintf(TextBuffer, "<char bbox=\"%0.0f %0.0f %0.0f %0.0f\" c=\"%s\"/>\n", xpos,
+                escaped_Unicode(x_entry->Unicode_Text[i], Escaped);
+                gs_snprintf(TextBuffer, sizeof(TextBuffer), "<char bbox=\"%0.0f %0.0f %0.0f %0.0f\" c=\"%s\"/>\n", xpos,
                     x_entry->start.y, xpos + x_entry->Widths[i], x_entry->end.y, Escaped);
                 gp_fwrite(TextBuffer, 1, strlen(TextBuffer), tdev->file);
                 xpos += x_entry->Widths[i];
@@ -806,13 +807,13 @@ static int decorated_text_output(gx_device_txtwrite_t *tdev)
                 gp_fwrite("<line>\n", sizeof(unsigned char), 7, tdev->file);
                 x_entry = block_line->x_ordered_list;
                 while(x_entry) {
-                    gs_sprintf(TextBuffer, "<span bbox=\"%0.0f %0.0f %0.0f %0.0f\" font=\"%s\" size=\"%0.4f\">\n", x_entry->start.x, x_entry->start.y,
+                    gs_snprintf(TextBuffer, sizeof(TextBuffer), "<span bbox=\"%0.0f %0.0f %0.0f %0.0f\" font=\"%s\" size=\"%0.4f\">\n", x_entry->start.x, x_entry->start.y,
                         x_entry->end.x, x_entry->end.y, x_entry->FontName,x_entry->size);
                     gp_fwrite(TextBuffer, 1, strlen(TextBuffer), tdev->file);
                     xpos = x_entry->start.x;
                     for (i=0;i<x_entry->Unicode_Text_Size;i++) {
-                        escaped_Unicode(x_entry->Unicode_Text[i], (char *)&Escaped);
-                        gs_sprintf(TextBuffer, "<char bbox=\"%0.0f %0.0f %0.0f %0.0f\" c=\"%s\"/>\n", xpos,
+                        escaped_Unicode(x_entry->Unicode_Text[i], Escaped);
+                        gs_snprintf(TextBuffer, sizeof(TextBuffer), "<char bbox=\"%0.0f %0.0f %0.0f %0.0f\" c=\"%s\"/>\n", xpos,
                             x_entry->start.y, xpos + x_entry->Widths[i], x_entry->end.y, Escaped);
                         gp_fwrite(TextBuffer, 1, strlen(TextBuffer), tdev->file);
                         xpos += x_entry->Widths[i];
@@ -1167,7 +1168,7 @@ txtwrite_put_params(gx_device * dev, gs_param_list * plist)
     if (code < 0)
         return code;
 
-    if (ofs.data != 0) {	/* Close the file if it's open. */
+    if (ofs.data != 0 && (ofs.size != strlen(tdev->fname) || strncmp((const char *)ofs.data, tdev->fname, ofs.size)) != 0) {	/* Close the file if it's open. */
         if (tdev->file != 0) {
             gp_fclose(tdev->file);
             tdev->file = 0;
@@ -1185,12 +1186,13 @@ txtwrite_put_params(gx_device * dev, gs_param_list * plist)
         dev->is_open = false;
 
     code = gx_default_put_params(dev, plist);
+    dev->is_open = open;
     if (code < 0)
         return code;
 
-    dev->is_open = open;
 
     dev->interpolate_control = 0;
+    dev->non_strict_bounds = 0;
 
     return 0;
 }
@@ -1483,6 +1485,7 @@ txtwrite_process_plain_text(gs_text_enum_t *pte)
     uint operation = pte->text.operation;
     txt_glyph_widths_t widths;
     gs_point wanted;	/* user space */
+    float glyph_width;
 
     for (i=pte->index;i<pte->text.size;i++) {
         gs_point dpt = {0,0};
@@ -1516,7 +1519,29 @@ txtwrite_process_plain_text(gs_text_enum_t *pte)
         if (code < 0)
             return code;
 
+        /* Calculate glyph_width from the **original** glyph metrics, not the overriding
+         * advance width (if TEXT_REPLACE_WIDTHS is set below)
+         */
         txt_char_widths_to_uts(pte->orig_font, &widths); /* convert design->text space */
+        glyph_width = widths.real_width.xy.x * penum->text_state->size;
+
+        if (pte->text.operation & TEXT_REPLACE_WIDTHS)
+        {
+            gs_point tpt;
+
+            /* We are applying a width override, from x/y/xyshow. This could be from
+             * a PostScript file, or it could be from a PDF file where we have a font
+             * with a FontMatrix which is neither horizontal nor vertical.
+             */
+            code = gs_text_replaced_width(&pte->text, pte->xy_index++, &tpt);
+            if (code < 0)
+                return_error(gs_error_unregistered);
+
+            widths.Width.w = widths.real_width.w = tpt.x;
+            widths.Width.xy.x = widths.real_width.xy.x = tpt.x;
+            widths.Width.xy.y = widths.real_width.xy.y = tpt.y;
+        }
+
         gs_distance_transform(widths.real_width.xy.x * penum->text_state->size,
                           widths.real_width.xy.y * penum->text_state->size,
                           &penum->text_state->matrix, &wanted);
@@ -1524,7 +1549,7 @@ txtwrite_process_plain_text(gs_text_enum_t *pte)
         pte->returned.total_width.y += wanted.y;
         penum->Widths[penum->TextBufferIndex] = wanted.x;
         penum->Advs[penum->TextBufferIndex] = wanted.x;
-        penum->GlyphWidths[penum->TextBufferIndex] = widths.real_width.xy.x * penum->text_state->size;
+        penum->GlyphWidths[penum->TextBufferIndex] = glyph_width;
         penum->SpanDeltaX[penum->TextBufferIndex] = widths.real_width.xy.x * penum->text_state->size;
 
         if (pte->text.operation & TEXT_ADD_TO_ALL_WIDTHS) {
@@ -1852,10 +1877,14 @@ textw_text_process(gs_text_enum_t *pte)
         if (!penum->SpanDeltaX)
             return gs_note_error(gs_error_VMerror);
     }
+retry:
     {
         switch (font->FontType) {
         case ft_CID_encrypted:
         case ft_CID_TrueType:
+            errprintf(pte->memory, "\n\n*** The txtwrite device does not currently support the use of CID-Keyed fonts. ***\n\n");
+	        return_error(gs_error_typecheck);
+            break;
         case ft_composite:
               code = txtwrite_process_cmap_text(pte);
             break;
@@ -1863,13 +1892,14 @@ textw_text_process(gs_text_enum_t *pte)
         case ft_encrypted2:
         case ft_TrueType:
         case ft_user_defined:
+        case ft_PDF_user_defined:
         case ft_PCL_user_defined:
         case ft_GL2_stick_user_defined:
         case ft_GL2_531:
             code = txtwrite_process_plain_text(pte);
             break;
         default:
-	  return_error(gs_error_rangecheck);
+	        return_error(gs_error_rangecheck);
             break;
         }
         if (code == 0) {
@@ -1912,6 +1942,9 @@ textw_text_process(gs_text_enum_t *pte)
             penum->pte_fallback = pte_fallback;
             gs_text_enum_copy_dynamic(pte_fallback, pte, false);
 
+            if (font->FontType == ft_PDF_user_defined && pte->text.size != 1)
+                pte_fallback->text.size = pte->index + 1;
+
             code = gs_text_process(pte_fallback);
             if (code != 0) {
                 penum->returned.current_char = pte_fallback->returned.current_char;
@@ -1920,6 +1953,8 @@ textw_text_process(gs_text_enum_t *pte)
             }
             gs_text_release(NULL, pte_fallback, "txtwrite_text_process");
             penum->pte_fallback = 0;
+            if (font->FontType == ft_PDF_user_defined)
+                goto retry;
         }
     }
     return code;
@@ -1931,7 +1966,11 @@ textw_text_process(gs_text_enum_t *pte)
 static int
 textw_text_resync(gs_text_enum_t *pte, const gs_text_enum_t *pfrom)
 {
-    return gs_text_resync(pte, pfrom);
+    if ((pte->text.operation ^ pfrom->text.operation) & ~TEXT_FROM_ANY)
+        return_error(gs_error_rangecheck);
+    pte->text = pfrom->text;
+    gs_text_enum_copy_dynamic(pte, pfrom, false);
+    return 0;
 }
 static bool
 textw_text_is_width_only(const gs_text_enum_t *pte)

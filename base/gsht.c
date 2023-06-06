@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -1133,7 +1133,7 @@ gx_gstate_dev_ht_install(
          * be cleared immediately below, so subsequently it will not be
          * possible to tell if that this information is being shared.
          */
-        if (pdht->components != NULL) {
+        if (pdht->components != NULL && !mem_diff) {
             int     input_ncomps = pdht->num_comp;
 
             for (i = 0; i < input_ncomps; i++) {
@@ -1149,7 +1149,7 @@ gx_gstate_dev_ht_install(
                     memset(p_s_order, 0, sizeof(*p_s_order));
             }
         }
-        if (used_default) {
+        if (used_default && !mem_diff) {
             memset(&pdht->order, 0, sizeof(pdht->order));
         }
 

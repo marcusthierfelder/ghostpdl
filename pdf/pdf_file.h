@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* File and decompression filter code */
@@ -85,12 +85,14 @@ int pdfi_filter(pdf_context *ctx, pdf_stream *stream_obj, pdf_c_stream *source, 
 int pdfi_filter_no_decryption(pdf_context *ctx, pdf_stream *d, pdf_c_stream *source, pdf_c_stream **new_stream, bool inline_image);
 void pdfi_close_file(pdf_context *ctx, pdf_c_stream *s);
 int pdfi_read_bytes(pdf_context *ctx, byte *Buffer, uint32_t size, uint32_t count, pdf_c_stream *s);
+int pdfi_read_byte(pdf_context *ctx, pdf_c_stream *s);
 int pdfi_unread(pdf_context *ctx, pdf_c_stream *s, byte *Buffer, uint32_t size);
+int pdfi_unread_byte(pdf_context *ctx, pdf_c_stream *s, char c);
 int pdfi_seek(pdf_context *ctx, pdf_c_stream *s, gs_offset_t offset, uint32_t origin);
 gs_offset_t pdfi_unread_tell(pdf_context *ctx);
 gs_offset_t pdfi_tell(pdf_c_stream *s);
 
-int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, pdf_string *EODString, pdf_c_stream *source, pdf_c_stream **new_stream, bool inline_image);
+int pdfi_apply_SubFileDecode_filter(pdf_context *ctx, int EODCount, const char *EODString, pdf_c_stream *source, pdf_c_stream **new_stream, bool inline_image);
 int pdfi_open_memory_stream(pdf_context *ctx, unsigned int size, byte **Buffer, pdf_c_stream *source, pdf_c_stream **new_stream);
 int pdfi_close_memory_stream(pdf_context *ctx, byte *Buffer, pdf_c_stream *source);
 int pdfi_open_memory_stream_from_stream(pdf_context *ctx, unsigned int size, byte **Buffer, pdf_c_stream *source, pdf_c_stream **new_pdf_stream, bool retain_ownership);
@@ -107,6 +109,8 @@ int pdfi_apply_SHA256_filter(pdf_context *ctx, pdf_c_stream *source, pdf_c_strea
 #endif
 
 int pdfi_open_resource_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s);
+bool pdfi_resource_file_exists(pdf_context *ctx, const char *fname, const int fnamelen);
 int pdfi_open_font_file(pdf_context *ctx, const char *fname, const int fnamelen, stream **s);
+bool pdfi_font_file_exists(pdf_context *ctx, const char *fname, const int fnamelen);
 
 #endif /* PDF_FILES */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /*  Data type definitions when using the gscms  */
@@ -38,6 +38,8 @@
 
 #define DEV_NEUTRAL_8 5
 #define DEV_NEUTRAL_16 5
+
+#define ARTIFEX_sRGB_HASH 0xfbea006420fca6be
 
 /* Define the preferred size of the output by the CMS */
 /* This can be different than the size of gx_color_value
@@ -291,6 +293,9 @@ struct cmm_dev_profile_s {
         bool pageneutralcolor;      /* Only valid if graydetection true */
         bool usefastcolor;         /* Used when we want to use no cm */
         bool blacktext;           /* Force text to be pure black */
+        bool blackvector;         /* Force vectors to be pure black */
+        float blackthresholdL;    /* Luminance threshold */
+        float blackthresholdC;    /* Chrominance threshold */
         bool supports_devn;        /* If the target handles devn colors */
         gs_overprint_control_t overprint_control;	/* enable is the default */
         gsicc_namelist_t *spotnames;  /* If our device profiles are devn */

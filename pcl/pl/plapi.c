@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 #include "plapi.h"
@@ -23,6 +23,7 @@
 #include "gp.h"
 #include "gscdefs.h"
 #include "gsmemory.h"
+#include "stream.h"
 
 /* Return revision numbers and strings of Ghostscript. */
 /* Used for determining if wrong GSDLL loaded. */
@@ -213,7 +214,7 @@ gsapi_get_default_device_list(void *instance, char **list, int *listlen)
     return gs_lib_ctx_get_default_device_list(ctx->memory, list, listlen);
 }
 
-static int utf16le_get_codepoint(gp_file *file, const char **astr)
+static int utf16le_get_codepoint(stream *s, const char **astr)
 {
     int c;
     int rune;
@@ -229,11 +230,11 @@ static int utf16le_get_codepoint(gp_file *file, const char **astr)
      * be wrong. */
 
     do {
-        if (file) {
-            rune = gp_fgetc(file);
+        if (s) {
+            rune = spgetc(s);
             if (rune == EOF)
                 return EOF;
-            c = gp_fgetc(file);
+            c = spgetc(s);
             if (c == EOF)
                 return EOF;
             rune += c<<8;
@@ -255,11 +256,11 @@ static int utf16le_get_codepoint(gp_file *file, const char **astr)
 lead: /* We've just read a leading surrogate */
         rune -= 0xD800;
         rune <<= 10;
-        if (file) {
-            trail = gp_fgetc(file);
+        if (s) {
+            trail = spgetc(s);
             if (trail == EOF)
                 return EOF;
-            c = gp_fgetc(file);
+            c = spgetc(s);
             if (c == EOF)
                 return EOF;
             trail += c<<8;

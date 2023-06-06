@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2021 Artifex Software, Inc.
+# Copyright (C) 2018-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 # Platform-independent makefile for the PDF interpreter
 
@@ -188,11 +188,11 @@ $(PDFOBJ)pdf_stack.$(OBJ): $(PDFSRC)pdf_stack.c $(PDFINCLUDES) $(PDF_MAK) $(MAKE
 
 $(PDFOBJ)pdf_gstate.$(OBJ): $(PDFSRC)pdf_gstate.c $(PDFINCLUDES) $(gsstate_h) \
 	$(gsmatrix_h) $(gslparam_h) $(gstparam_h) $(gxdht_h) $(gxht_h) $(gzht_h) $(gsht_h) \
-	$(gscoord_h) $(gsutil_h) $(gscolor3_h) $(PDF_MAK) $(MAKEDIRS)
+	$(gscoord_h) $(gsutil_h) $(gscolor3_h) $(PDF_MAK) $(MAKEDIRS) $(gzpath_h) $(gspenum_h)
 	$(PDFCCC) $(PDFSRC)pdf_gstate.c $(PDFO_)pdf_gstate.$(OBJ)
 
 $(PDFOBJ)pdf_colour.$(OBJ): $(PDFSRC)pdf_colour.c $(PDFINCLUDES) \
-	$(gsicc_manage_h) $(gsicc_profilecache_h) $(gsicc_create_h) $(gsptype2_h) $(gscsepr_h) \
+	$(gsicc_manage_h) $(gsicc_profilecache_h) $(gsicc_create_h) $(gsicc_cache_h) $(gsptype2_h) $(gscsepr_h) \
 	$(stream_h) $(strmio_h) $(gscdevn_h) $(gxcdevn_h) $(gscolor_h) $(gsicc_h) $(gsstate_h) \
 	$(PDF_MAK) $(MAKEDIRS)
 	$(PDFCCC) $(PDFSRC)pdf_colour.c $(PDFO_)pdf_colour.$(OBJ)
@@ -211,7 +211,7 @@ $(PDFOBJ)pdf_loop_detect.$(OBJ): $(PDFSRC)pdf_loop_detect.c $(PDFINCLUDES) $(PDF
 	$(PDFCCC) $(PDFSRC)pdf_loop_detect.c $(PDFO_)pdf_loop_detect.$(OBJ)
 
 $(PDFOBJ)pdf_int.$(OBJ): $(PDFSRC)pdf_int.c $(PDFINCLUDES) $(plmain_h) \
-	$(stream_h) $(strmio_h) $(PDF_MAK) $(MAKEDIRS)
+	$(stream_h) $(strmio_h) $(gsgstate_h) $(PDF_MAK) $(MAKEDIRS)
 	$(PDFCCC) $(PDFSRC)pdf_int.c $(PDFO_)pdf_int.$(OBJ)
 
 $(PDFOBJ)pdf_file_luratech.$(OBJ): $(PDFSRC)pdf_file.c $(sjpeg_h) $(stream_h) $(strimpl_h) \

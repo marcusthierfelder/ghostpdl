@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -56,6 +56,7 @@
 #include "gscdefs.h"
 #include "gxdownscale.h"
 #include "gxdevsop.h"
+#include "gscms.h"
 
 /* ------ The device descriptors ------ */
 
@@ -297,6 +298,41 @@ const gx_device_pngalpha gs_pngalpha_device = {
          256 /* dither grays */,
          256 /* dither colors */,
          { 4, 4 } /* antialias info text, graphics */,
+         GX_CINFO_UNKNOWN_SEP_LIN /* separable_and_linear */,
+         { 0 } /* component shift */,
+         { 0 } /* component bits */,
+         { 0 } /* component mask */,
+         "DeviceRGB" /* process color name */,
+         GX_CINFO_OPMSUPPORTED_UNKNOWN /* opmsupported */,
+         0 /* process_cmps */,
+         0 /* icc_locations */
+        },
+        std_device_part2_(
+          (int)((float)(DEFAULT_WIDTH_10THS) * (X_DPI) / 10 + 0.5),
+          (int)((float)(DEFAULT_HEIGHT_10THS) * (Y_DPI) / 10 + 0.5),
+           X_DPI, Y_DPI),
+        offset_margin_values(0, 0, 0, 0, 0, 0),
+        std_device_part3_(),
+        prn_device_body_rest_(png_print_page),
+        GX_DOWNSCALER_PARAMS_DEFAULTS,
+        0xffffff	/* white background */
+};
+
+const gx_device_pngalpha gs_png16malpha_device = {
+        std_device_part1_(gx_device_pngalpha,
+                pngalpha_initialize_device_procs, "png16malpha",
+                &st_device_printer, open_init_closed),
+        /* color_info */
+        {3 /* max components */,
+         3 /* number components */,
+         GX_CINFO_POLARITY_ADDITIVE /* polarity */,
+         32 /* depth */,
+         -1 /* gray index */,
+         255 /* max gray */,
+         255 /* max color */,
+         256 /* dither grays */,
+         256 /* dither colors */,
+         { 1, 1 } /* antialias info text, graphics */,
          GX_CINFO_UNKNOWN_SEP_LIN /* separable_and_linear */,
          { 0 } /* component shift */,
          { 0 } /* component bits */,
@@ -597,14 +633,19 @@ do_png_print_page(gx_device_png * pdev, gp_file * file, bool monod)
         num_palette = 0;
     }
     /* add comment */
+#ifdef CLUSTER
+    strncpy(software_key, "GPL Ghostscript", sizeof(software_key));
+    strncpy(software_text, "GPL Ghostscript", sizeof(software_text));
+#else
     strncpy(software_key, "Software", sizeof(software_key));
     {
         int major = (int)(gs_revision / 1000);
         int minor = (int)(gs_revision - (major * 1000)) / 10;
         int patch = gs_revision % 10;
 
-        gs_sprintf(software_text, "%s %d.%02d.%d", gs_product, major, minor, patch);
+        gs_snprintf(software_text, sizeof(software_text), "%s %d.%02d.%d", gs_product, major, minor, patch);
     }
+#endif
     text_png.compression = -1;	/* uncompressed */
     text_png.key = software_key;
     text_png.text = software_text;
@@ -635,13 +676,18 @@ do_png_print_page(gx_device_png * pdev, gp_file * file, bool monod)
 
     if (pdev->icc_struct != NULL && pdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE] != NULL) {
         cmm_profile_t *icc_profile = pdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE];
-        /* PNG can only be RGB or gray.  No CIELAB :(  */
-        if (icc_profile->data_cs == gsRGB || icc_profile->data_cs == gsGRAY) {
-            if (icc_profile->num_comps == pdev->color_info.num_components &&
-                !(pdev->icc_struct->usefastcolor)) {
-                png_set_iCCP(png_ptr, info_ptr, icc_profile->name,
-                    PNG_COMPRESSION_TYPE_DEFAULT, icc_profile->buffer,
-                    icc_profile->buffer_size);
+        if (icc_profile->hash_is_valid && icc_profile->hashcode == ARTIFEX_sRGB_HASH) {
+            /* sRGB case. Just use the tag */
+            png_set_sRGB(png_ptr, info_ptr, PNG_sRGB_INTENT_RELATIVE);
+        } else {
+            /* PNG can only be RGB or gray.  No CIELAB :(  */
+            if (icc_profile->data_cs == gsRGB || icc_profile->data_cs == gsGRAY) {
+                if (icc_profile->num_comps == pdev->color_info.num_components &&
+                    !(pdev->icc_struct->usefastcolor)) {
+                    png_set_iCCP(png_ptr, info_ptr, icc_profile->name,
+                        PNG_COMPRESSION_TYPE_DEFAULT, icc_profile->buffer,
+                        icc_profile->buffer_size);
+                }
             }
         }
     }
@@ -661,14 +707,19 @@ do_png_print_page(gx_device_png * pdev, gp_file * file, bool monod)
     /* Set up the ICC information */
     if (pdev->icc_struct != NULL && pdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE] != NULL) {
         cmm_profile_t *icc_profile = pdev->icc_struct->device_profile[GS_DEFAULT_DEVICE_PROFILE];
-        /* PNG can only be RGB or gray.  No CIELAB :(  */
-        if (icc_profile->data_cs == gsRGB || icc_profile->data_cs == gsGRAY) {
-            if (icc_profile->num_comps == pdev->color_info.num_components &&
-                !(pdev->icc_struct->usefastcolor)) {
-                info_ptr->iccp_name = icc_profile->name;
-                info_ptr->iccp_profile = icc_profile->buffer;
-                info_ptr->iccp_proflen = icc_profile->buffer_size;
-                info_ptr->valid |= PNG_INFO_iCCP;
+        if (icc_profile->hash_is_valid && icc_profile->hashcode == ARTIFEX_sRGB_HASH) {
+            /* sRGB case. Just use the tag */
+            png_set_sRGB(png_ptr, info_ptr, PNG_sRGB_INTENT_RELATIVE);
+        } else {
+            /* PNG can only be RGB or gray.  No CIELAB :(  */
+            if (icc_profile->data_cs == gsRGB || icc_profile->data_cs == gsGRAY) {
+                if (icc_profile->num_comps == pdev->color_info.num_components &&
+                    !(pdev->icc_struct->usefastcolor)) {
+                    info_ptr->iccp_name = icc_profile->name;
+                    info_ptr->iccp_profile = icc_profile->buffer;
+                    info_ptr->iccp_proflen = icc_profile->buffer_size;
+                    info_ptr->valid |= PNG_INFO_iCCP;
+                }
             }
         }
     }
@@ -893,7 +944,7 @@ pngalpha_encode_color(gx_device * dev, const gx_color_value cv[])
 /* Map a color index to a r-g-b color. */
 static int
 pngalpha_decode_color(gx_device * dev, gx_color_index color,
-                             gx_color_value prgb[3])
+                             gx_color_value prgb[])
 {
     prgb[0] = gx_color_value_from_byte((color >> 24) & 0xff);
     prgb[1] = gx_color_value_from_byte((color >> 16) & 0xff);

@@ -1,4 +1,4 @@
-# Copyright (C) 2001-2021 Artifex Software, Inc.
+# Copyright (C) 2001-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 # Partial makefile for Unix shared library target
 
@@ -193,12 +193,16 @@ gpdl-so-links-subtarget: $(GPDL_SO) $(UNIX_DLL_MAK) $(MAKEDIRS)
 	$(NO_OP)
 
 # Build the small Ghostscript loaders, with Gtk+ and without
-$(GSSOC_XE): gs-so-links-subtarget $(PSSRC)dxmainc.c $(UNIX_DLL_MAK) $(MAKEDIRS)
+$(GLO)dxmainc.$(OBJ): $(PSSRC)dxmainc.c $(UNIX_DLL_MAK) $(MAKEDIRS)
 	$(GLCC) $(GLO_)dxmainc.$(OBJ) $(C_) $(PSSRC)dxmainc.c
+
+$(GLO)dxmain.$(OBJ): $(PSSRC)dxmain.c $(UNIX_DLL_MAK) $(MAKEDIRS)
+	$(GLCC) $(SOC_CFLAGS) $(GLO_)dxmain.$(OBJ) $(C_) $(PSSRC)dxmain.c
+
+$(GSSOC_XE): gs-so-links-subtarget $(GLO)dxmainc.$(OBJ) $(UNIX_DLL_MAK) $(MAKEDIRS)
 	$(GLCC) -L$(BINDIR) $(LDFLAGS) $(O_) $(GSSOC_XE) $(GLOBJ)dxmainc.$(OBJ) -l$(GS_SO_BASE)
 
-$(GSSOX_XE): gs-so-links-subtarget $(PSSRC)$(SOC_LOADER).c $(UNIX_DLL_MAK) $(MAKEDIRS)
-	$(GLCC) $(SOC_CFLAGS) $(GLO_)$(SOC_LOADER).$(OBJ) $(C_) $(PSSRC)$(SOC_LOADER).c
+$(GSSOX_XE): gs-so-links-subtarget $(GLO)$(SOC_LOADER).$(OBJ) $(UNIX_DLL_MAK) $(MAKEDIRS)
 	$(GLCC) -L$(BINDIR) $(LDFLAGS) $(O_) $(GSSOX_XE) $(GLOBJ)$(SOC_LOADER).$(OBJ) -l$(GS_SO_BASE) $(SOC_LIBS)
 
 $(PCLSOC_XE): gpcl6-so-links-subtarget $(UNIX_DLL_MAK) $(PLOBJ)$(REALMAIN_SRC).$(OBJ) $(MAKEDIRS)

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -33,6 +33,7 @@
 #include "gsstate.h"
 #include "gxalloc.h"
 #include "gxdevice.h"
+#include "gxgstate.h"
 #include "gxstate.h"
 #include "pjparse.h"
 #include "pltop.h"
@@ -41,6 +42,7 @@
 #include "rtgmode.h"
 #include "gsicc_manage.h"
 #include "pcparam.h"
+#include "pcuptrn.h"
 
 /* Configuration table for modules */
 extern const pcl_init_t pcparse_init;
@@ -221,6 +223,7 @@ pcl_impl_allocate_interp_instance(pl_interp_implementation_t *impl,
                                   gs_memory_t * mem     /* allocator to allocate instance from */
     )
 {
+    int code;
     /* Allocate everything up front */
     pcl_interp_instance_t *pcli  /****** SHOULD HAVE A STRUCT DESCRIPTOR ******/
         = (pcl_interp_instance_t *) gs_alloc_bytes(mem,
@@ -255,25 +258,34 @@ pcl_impl_allocate_interp_instance(pl_interp_implementation_t *impl,
     /* Init gstate to point to pcl state */
     gs_gstate_set_client(pgs, &pcli->pcs, &pcl_gstate_procs, true);
     /* register commands */
-    {
-        int code = pcl_do_registrations(&pcli->pcs, &pcli->pst);
-
-        if (code < 0) {
-            if (pcli->pcs.pids != NULL)
-                gs_free_object(mem, pcli->pcs.pids, "PCL gsave");
-            gs_gstate_free(pgs);
-            gs_free_object(mem, pcli, "pcl_allocate_interp_instance(pcl_interp_instance_t)");
-            return (code);
-        }
+    code = pcl_do_registrations(&pcli->pcs, &pcli->pst);
+    if (code < 0) {
+        if (pcli->pcs.pids != NULL)
+            gs_free_object(mem, pcli->pcs.pids, "PCL gsave");
+        gs_gstate_free(pgs);
+        gs_free_object(mem, pcli, "pcl_allocate_interp_instance(pcl_interp_instance_t)");
+        return (code);
     }
 
     pcli->pcs.pjls = pl_main_get_pjl_instance(mem);
 
+    /* Perform a gsave. This is to ensure that any grestores done
+     * in the operation of the device never restore to the topmost
+     * gstate. gs_grestore doesn't like that, and if asked to do so
+     * it does another gsave. This leaves us off by one in the
+     * counting which causes leaks. */
+    code = gs_gsave(pcli->pcs.pgs);
+    if (code < 0)
+        return code;
+
     /* Return success */
     impl->interp_client_data = pcli;
     /* Initial reset for the PCL interpreter */
-    pcl_do_resets(&pcli->pcs, pcl_reset_initial);
-    return 0;
+    code = pcl_do_resets(&pcli->pcs, pcl_reset_initial);
+    if (code < 0) {
+        (void)impl->proc_deallocate_interp_instance(impl);
+    }
+    return code;
 }
 
 /* if the device option string PCL is not given, the default
@@ -336,6 +348,14 @@ pcl_impl_init_job(pl_interp_implementation_t * impl,       /* interp instance to
     stage = Ssetdevice;
     if ((code = gs_setdevice_no_erase(pcli->pcs.pgs, device)) < 0)      /* can't erase yet */
         goto pisdEnd;
+
+    /* Warn the device we use ROPs. Do this early, as it may cause the
+     * device to change color model. */
+    code = put_param1_bool(&pcli->pcs, "LanguageUsesROPs", true);
+    if (!device->is_open)
+        code = gs_opendevice(device);
+    if (code < 0)
+        return code;
 
     stage = Sinitg;
     /* Do inits of gstate that may be reset by setdevice */
@@ -408,13 +428,6 @@ pcl_impl_init_job(pl_interp_implementation_t * impl,       /* interp instance to
             break;
     }
 
-    /* Warn the device we use ROPs */
-    if (code == 0) {
-        code = put_param1_bool(&pcli->pcs, "LanguageUsesROPs", true);
-        if (!device->is_open)
-            code = gs_opendevice(device);
-    }
-
     return code;
 }
 
@@ -474,7 +487,10 @@ pcl_impl_process_eof(pl_interp_implementation_t * impl    /* interp instance to 
     )
 {
     pcl_interp_instance_t *pcli = impl->interp_client_data;
-    int code = pcl_process_init(&pcli->pst, &pcli->pcs);
+    int code;
+    if (pcli->pst.args.data_on_heap)
+        gs_free_object(pcli->memory, pcli->pst.args.data, "command data");
+    code = pcl_process_init(&pcli->pst, &pcli->pcs);
     if (code < 0)
         return code;
     /* force restore & cleanup if unexpected data end was encountered */
@@ -539,6 +555,7 @@ pcl_impl_deallocate_interp_instance(pl_interp_implementation_t * impl     /* ins
 {
     pcl_interp_instance_t *pcli = impl->interp_client_data;
     gs_memory_t *mem = pcli->memory;
+    int i;
 
     /* free memory used by the parsers */
     if (pcl_parser_shutdown(&pcli->pst, mem) < 0) {
@@ -549,13 +566,51 @@ pcl_impl_deallocate_interp_instance(pl_interp_implementation_t * impl     /* ins
                    pcli->pst.hpgl_parser_state,
                    "pcl_deallocate_interp_instance(pcl_interp_instance_t)");
 
+    pl_dict_release(&pcli->pcs.palette_store);
+
     /* free default, pdflt_* objects */
     pcl_free_default_objects(mem, &pcli->pcs);
+
+    if (pcli->pcs.ppaper_type_table) {
+        gs_free_object(pcli->pcs.memory, pcli->pcs.ppaper_type_table, "Paper Table");
+        pcli->pcs.ppaper_type_table = 0;
+    }
+
+    /* Restore the gstate once, to match the extra 'gsave' done in
+     * pcl_impl_allocate_interp_instance. */
+    gs_grestore_only(pcli->pcs.pgs);
+
+    /* Fixes 3 Memento leaks with tests_private/customer_tests/bug692970.pcl. */
+    gx_pattern_cache_free(pcli->pcs.pgs->pattern_cache);
 
     /* free halftone cache in gs state */
     gs_gstate_free(pcli->pcs.pgs);
     /* remove pcl's gsave grestore stack */
     pcl_free_gstate_stk(&pcli->pcs);
+
+    /* Release font dictionaries. */
+    pl_dict_release(&pcli->pcs.soft_symbol_sets);
+    pl_dict_release(&pcli->pcs.built_in_symbol_sets);
+    pl_dict_release(&pcli->pcs.simm_fonts);
+    pl_dict_release(&pcli->pcs.cartridge_fonts);
+    pl_dict_release(&pcli->pcs.soft_fonts);
+    pl_dict_release(&pcli->pcs.built_in_fonts);
+
+    pl_dict_release(&pcli->pcs.gl_patterns);
+    pl_dict_release(&pcli->pcs.pcl_patterns);
+    pl_dict_release(&pcli->pcs.macros);
+
+    gs_font_dir_free(pcli->pcs.font_dir);
+
+    gx_path_free(&pcli->pcs.g.polygon.buffer.path, "pcl_deallocate_interp_instance");
+    for (i = 0; i < sizeof(pcli->pcs.bi_pattern_array)/sizeof(*pcli->pcs.bi_pattern_array); i++)
+        pcl_pattern_free_pattern(pcli->pcs.memory, pcli->pcs.bi_pattern_array[i], "destroy PCL pattern");
+
+    /* Fixed 114 leaked blocks with tests_private/customer_tests/bug689453.pcl. */
+    pcl_pattern_free_pattern(pcli->pcs.memory, pcli->pcs.punsolid_pattern, "destroy PCL unsolid_pattern");
+
+    gs_free_object(mem, pcli->pcs.macro_definition, "pcl_deallocate_interp_instance");
+
     gs_free_object(mem, pcli,
                    "pcl_deallocate_interp_instance(pcl_interp_instance_t)");
     return 0;

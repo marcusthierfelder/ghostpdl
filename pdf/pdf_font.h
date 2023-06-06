@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2021 Artifex Software, Inc.
+/* Copyright (C) 2018-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Font operations for the PDF interpreter */
@@ -57,10 +57,17 @@ static inline pdf_font *pdfi_get_current_pdf_font(pdf_context *ctx)
     return NULL;
 }
 
+int pdfi_create_Widths(pdf_context *ctx, pdf_dict *font_dict, pdf_font *pdffont);
 int pdfi_create_Encoding(pdf_context *ctx, pdf_obj *pdf_Encoding, pdf_obj *font_Encoding, pdf_obj **Encoding);
 gs_glyph pdfi_encode_char(gs_font * pfont, gs_char chr, gs_glyph_space_t not_used);
 int pdfi_glyph_index(gs_font *pfont, byte *str, uint size, uint *glyph);
 int pdfi_glyph_name(gs_font * pfont, gs_glyph glyph, gs_const_string * pstr);
+
+void pdfi_cidfont_cid_subst_tables(const char *reg, const int reglen, const char *ord,
+                const int ordlen, pdfi_cid_decoding_t **decoding, pdfi_cid_subst_nwp_table_t **substnwp);
+
+int pdfi_cidfont_decode_glyph(gs_font *font, gs_glyph glyph, int ch, ushort *u, unsigned int length);
+
 int pdfi_tounicode_char_to_unicode(pdf_context *ctx, pdf_cmap *tounicode, gs_glyph glyph, int ch, ushort *unicode_return, unsigned int length);
 int pdfi_decode_glyph(gs_font * font, gs_glyph glyph, int ch, ushort *unicode_return, unsigned int length);
 
@@ -71,6 +78,8 @@ int pdfi_fapi_passfont(pdf_font *font, int subfont, char *fapi_request,
                  char *file_name, byte * font_data, int font_data_len);
 
 int pdfi_fapi_check_cmap_for_GID(gs_font *pfont, uint c, uint *g);
+
+int pdfi_map_glyph_name_via_agl(pdf_dict *cstrings, pdf_name *gname, pdf_string **cstring);
 
 int pdfi_init_font_directory(pdf_context *ctx);
 
@@ -103,5 +112,7 @@ enum {
 };
 
 int pdfi_get_cidfont_glyph_metrics(gs_font *pfont, gs_glyph cid, double *widths, bool vertical);
+int pdfi_font_create_widths(pdf_context *ctx, pdf_dict *fontdict, pdf_font *font, double wscale);
+void pdfi_font_set_first_last_char(pdf_context *ctx, pdf_dict *fontdict, pdf_font *font);
 int pdfi_font_generate_pseudo_XUID(pdf_context *ctx, pdf_dict *fontdict, gs_font_base *pfont);
 #endif

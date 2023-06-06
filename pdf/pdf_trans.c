@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Transparency support */
@@ -20,6 +20,7 @@
 #include "pdf_trans.h"
 #include "pdf_dict.h"
 #include "pdf_colour.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_array.h"
 #include "pdf_image.h"
@@ -32,6 +33,7 @@
 #include "gscoord.h"            /* For gs_setmatrix()*/
 #include "gsstate.h"            /* For gs_currentstrokeoverprint() and others */
 #include "gspath.h"             /* For gs_clippath() */
+#include "gsicc_cache.h"        /* For gsicc_profiles_equal() */
 
 /* Implement the TransferFunction using a Function. */
 static int
@@ -101,7 +103,7 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
     double f;
     gs_matrix save_matrix, GroupMat, group_Matrix;
     gs_transparency_mask_subtype_t subtype = TRANSPARENCY_MASK_Luminosity;
-    pdf_bool *Processed = NULL;
+    bool Processed, ProcessedKnown = 0;
     bool save_OverrideICC = gs_currentoverrideicc(ctx->pgs);
 
 #if DEBUG_TRANSPARENCY
@@ -112,28 +114,26 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
     /* Following the logic of the ps code, cram a /Processed key in the SMask dict to
      * track whether it's already been processed.
      */
-    code = pdfi_dict_knownget_type(ctx, SMask, "Processed", PDF_BOOL, (pdf_obj **)&Processed);
-    if (code > 0 && Processed->value) {
+    code = pdfi_dict_knownget_bool(ctx, SMask, "Processed", &Processed);
+    if (code > 0) {
+        if (Processed) {
 #if DEBUG_TRANSPARENCY
-        dbgmprintf(ctx->memory, "SMask already built, skipping\n");
+          dbgmprintf(ctx->memory, "SMask already built, skipping\n");
 #endif
-        goto exit;
+          code = 0;
+          goto exit;
+        }
+        ProcessedKnown = 1;
     }
 
     gs_setoverrideicc(ctx->pgs, true);
 
     /* If /Processed not in the dict, put it there */
     if (code == 0) {
-        /* the cleanup at end of this routine assumes Processed has a ref */
-        code = pdfi_object_alloc(ctx, PDF_BOOL, 0, (pdf_obj **)&Processed);
+        code = pdfi_dict_put_bool(ctx, SMask, "Processed", false);
         if (code < 0)
             goto exit;
-        Processed->value = false;
-        /* pdfi_object_alloc() doesn't grab a ref */
-        pdfi_countup(Processed);
-        code = pdfi_dict_put(ctx, SMask, "Processed", (pdf_obj *)Processed);
-        if (code < 0)
-            goto exit;
+        ProcessedKnown = 1;
     }
 
     /* See pdf1.7 pg 553 (pain in the butt to find this!) */
@@ -142,9 +142,12 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
         /* G is transparency group XObject (required) */
         code = pdfi_dict_knownget_type(ctx, SMask, "G", PDF_STREAM, (pdf_obj **)&G_stream);
         if (code <= 0) {
-            dmprintf(ctx->memory, "WARNING: Missing 'G' in SMask, ignoring.\n");
             pdfi_trans_end_smask_notify(ctx);
-            code = 0;
+            if (ctx->args.pdfstoponerror)
+                code = gs_note_error(gs_error_undefined);
+            else
+                code = 0;
+            pdfi_set_error(ctx, 0, NULL, E_PDF_SMASK_MISSING_G, "pdfi_trans_set_mask", "");
             goto exit;
         }
 
@@ -155,31 +158,40 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
         /* S is a subtype name (required) */
         code = pdfi_dict_knownget_type(ctx, SMask, "S", PDF_NAME, (pdf_obj **)&S);
         if (code <= 0) {
-            dmprintf(ctx->memory, "WARNING: Missing 'S' in SMask (defaulting to Luminosity)\n");
             subtype = TRANSPARENCY_MASK_Luminosity;
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_MISSING_S, "pdfi_trans_set_mask", "");
         }
         else if (pdfi_name_is(S, "Luminosity")) {
             subtype = TRANSPARENCY_MASK_Luminosity;
         } else if (pdfi_name_is(S, "Alpha")) {
             subtype = TRANSPARENCY_MASK_Alpha;
         } else {
-            dmprintf(ctx->memory, "WARNING: Unknown subtype 'S' in SMask (defaulting to Luminosity)\n");
             subtype = TRANSPARENCY_MASK_Luminosity;
+            pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_UNKNOWN_S, "pdfi_trans_set_mask", "");
         }
 
         /* TR is transfer function (Optional) */
         code = pdfi_dict_knownget(ctx, SMask, "TR", (pdf_obj **)&TR);
         if (code > 0) {
-            if (TR->type == PDF_DICT || TR->type == PDF_STREAM) {
-                code = pdfi_build_function(ctx, &gsfunc, NULL, 1, TR, NULL);
-                if (code < 0)
-                    goto exit;
-            } else if (TR->type == PDF_NAME) {
-                if (!pdfi_name_is((pdf_name *)TR, "Identity")) {
-                    dmprintf(ctx->memory, "WARNING: Unknown TR in SMask\n");
-                }
-            } else {
-                dmprintf(ctx->memory, "WARNING: Ignoring invalid TR in SMask\n");
+            switch (pdfi_type_of(TR)) {
+                case PDF_DICT:
+                case PDF_STREAM:
+                    code = pdfi_build_function(ctx, &gsfunc, NULL, 1, TR, NULL);
+                    if (code < 0)
+                        goto exit;
+                    if (gsfunc->params.m != 1 || gsfunc->params.n != 1) {
+                        pdfi_free_function(ctx, gsfunc);
+                        gsfunc = NULL;
+                        pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_INVALID_TR, "pdfi_trans_set_mask", "");
+                    }
+                    break;
+                case PDF_NAME:
+                    if (!pdfi_name_is((pdf_name *)TR, "Identity")) {
+                        pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_UNKNOWN_TR, "pdfi_trans_set_mask", "");
+                    }
+                    break;
+                default:
+                    pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_UNKNOWN_TR_TYPE, "pdfi_trans_set_mask", "");
             }
         }
 
@@ -244,8 +256,14 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
         if (code > 0) {
             /* TODO: Stuff with colorspace, see .execmaskgroup */
             code = pdfi_dict_knownget(ctx, Group, "CS", &CS);
-            if (code < 0)
-                goto exit;
+            if (code < 0) {
+                code = pdfi_dict_knownget(ctx, Group, "ColorSpace", &CS);
+                if (code < 0) {
+                    pdfi_set_error(ctx, 0, NULL, E_PDF_GROUP_NO_CS, "pdfi_trans_set_mask", (char *)"*** Defaulting to currrent colour space");
+                    goto exit;
+                }
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_GROUP_HAS_COLORSPACE, "pdfi_trans_set_mask", NULL);
+            }
             if (code > 0) {
                 code = pdfi_create_colorspace(ctx, CS, (pdf_dict *)ctx->main_stream,
                                               ctx->page.CurrentPageDict, &pcs, false);
@@ -277,6 +295,9 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
             }
             params.Background_components = pdfi_array_size(BC);
 
+            if (gs_color_space_num_components(params.ColorSpace) != params.Background_components)
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_GROUP_BAD_BC, "pdfi_trans_set_mask", NULL);
+
             /* TODO: Not sure how to handle this...  recheck PS code (pdf_draw.ps/gssmask) */
             /* This should be "currentgray" for the color that we put in params.ColorSpace,
              * It looks super-convoluted to actually get this value.  Really?
@@ -291,9 +312,9 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
             goto exit;
 
         code = pdfi_form_execgroup(ctx, ctx->page.CurrentPageDict, G_stream,
-                                   igs->GroupGState, NULL, &group_Matrix);
+                                   igs->GroupGState, NULL, NULL, &group_Matrix);
         code1 = gs_end_transparency_mask(ctx->pgs, colorindex);
-        if (code != 0)
+        if (code == 0)
             code = code1;
 
         /* Put back the matrix (we couldn't just rely on gsave/grestore for whatever reason,
@@ -302,11 +323,15 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
         gs_setmatrix(ctx->pgs, &save_matrix);
 
         /* Set Processed flag */
-        if (code == 0 && Processed)
-            Processed->value = true;
+        if (code == 0 && ProcessedKnown)
+        {
+            code = pdfi_dict_put_bool(ctx, SMask, "Processed", true);
+            if (code < 0)
+                goto exit;
+        }
     } else {
         /* take action on a non-/Mask entry. What does this mean ? What do we need to do */
-        dmprintf(ctx->memory, "Warning: Type is not /Mask, entry ignored in pdfi_set_trans_mask\n");
+        pdfi_set_warning(ctx, 0, NULL, W_PDF_SMASK_UNKNOWN_TYPE, "pdfi_trans_set_mask", "");
     }
 
  exit:
@@ -325,7 +350,6 @@ static int pdfi_trans_set_mask(pdf_context *ctx, pdfi_int_gstate *igs, int color
     pdfi_countdown(BBox);
     pdfi_countdown(Matrix);
     pdfi_countdown(CS);
-    pdfi_countdown(Processed);
 #if DEBUG_TRANSPARENCY
     dbgmprintf(ctx->memory, "pdfi_trans_set_mask (.execmaskgroup) END\n");
 #endif
@@ -386,7 +410,7 @@ static int pdfi_transparency_group_common(pdf_context *ctx, pdf_dict *page_dict,
         /* Didn't find a /CS key, try again using /ColorSpace */
         code = pdfi_dict_knownget(ctx, group_dict, "ColorSpace", &CS);
     }
-    if (code > 0 && CS->type != PDF_NULL) {
+    if (code > 0 && pdfi_type_of(CS) != PDF_NULL) {
         code = pdfi_setcolorspace(ctx, CS, group_dict, page_dict);
         if (code < 0)
             goto exit;
@@ -401,6 +425,32 @@ static int pdfi_transparency_group_common(pdf_context *ctx, pdf_dict *page_dict,
         return_error(code);
 
     return pdfi_gs_begin_transparency_group(ctx->pgs, &params, (const gs_rect *)bbox, group_type);
+}
+
+static bool pdfi_outputprofile_matches_oiprofile(pdf_context *ctx)
+{
+    cmm_dev_profile_t *profile_struct;
+    int code;
+    int k;
+
+    code = dev_proc(ctx->pgs->device, get_profile)(ctx->pgs->device,  &profile_struct);
+    if (code < 0)
+        return true;  /* Assume they match by default and in error condition */
+
+    if (profile_struct->oi_profile == NULL)
+        return true; /* no OI profile so no special case to worry about */
+    else {
+        /* Check the device profile(s). If any of them do not match, then
+           we assume there is not a match and it may be necessary to
+           use the pdf14 device to prerender to the OI profile */
+        for (k = 0; k < NUM_DEVICE_PROFILES; k++) {
+            if (profile_struct->device_profile[k] != NULL) {
+                if (!gsicc_profiles_equal(profile_struct->oi_profile, profile_struct->device_profile[k]))
+                    return false;
+            }
+        }
+        return true;
+    }
 }
 
 /* Begin a simple group
@@ -593,14 +643,19 @@ void pdfi_trans_set_needs_OP(pdf_context *ctx)
 
     ctx->page.needs_OP = false;
     ctx->page.simulate_op = false;
-    switch(ctx->args.overprint_control) {
-    case PDF_OVERPRINT_DISABLE:
+    switch(ctx->pgs->device->icc_struct->overprint_control) {
+    case gs_overprint_control_disable:
         /* Use defaults */
         break;
-    case PDF_OVERPRINT_SIMULATE:
+    case gs_overprint_control_simulate:
         if (!device_transparency && ctx->page.has_OP) {
             if (is_cmyk) {
-                if (ctx->page.num_spots > 0) {
+                /* If the page has spots and the device is not spot capable OR
+                   if the output intent profile is to be used, but we have
+                   a device output profile that is different, then we will be
+                   doing simulation with the pdf14 device buffer */
+                if ((ctx->page.num_spots > 0  && !ctx->device_state.spot_capable) ||
+                    !pdfi_outputprofile_matches_oiprofile(ctx)) {
                     ctx->page.needs_OP = true;
                     ctx->page.simulate_op = true;
                 }
@@ -610,7 +665,7 @@ void pdfi_trans_set_needs_OP(pdf_context *ctx)
             }
         }
         break;
-    case PDF_OVERPRINT_ENABLE:
+    case gs_overprint_control_enable:
     default:
         if (!is_cmyk || device_transparency)
             ctx->page.needs_OP = false;
@@ -665,7 +720,7 @@ int pdfi_trans_setup(pdf_context *ctx, pdfi_trans_state_t *state, gs_rect *bbox,
     bool current_overprint;
     bool okOPcs = false;
     bool ChangeBM = false;
-    gs_blend_mode_t mode;
+    gs_blend_mode_t  mode = gs_currentblendmode(ctx->pgs);  /* quite warning */
     bool need_group = false;
 
     memset(state, 0, sizeof(*state));
@@ -720,13 +775,22 @@ int pdfi_trans_setup(pdf_context *ctx, pdfi_trans_state_t *state, gs_rect *bbox,
         if (igs->SMask != NULL && mode != BLEND_MODE_Normal && mode != BLEND_MODE_Compatible)
             isolated = true;
         code = pdfi_trans_begin_simple_group(ctx, bbox, stroked_bbox, isolated, false);
-        state->GroupPushed = true;
+
+        /* Group was not pushed if error */
+        if (code >= 0)
+            state->GroupPushed = true;
+
         state->saveStrokeAlpha = gs_getstrokeconstantalpha(ctx->pgs);
         state->saveFillAlpha = gs_getfillconstantalpha(ctx->pgs);
         code = gs_setfillconstantalpha(ctx->pgs, 1.0);
         code = gs_setstrokeconstantalpha(ctx->pgs, 1.0);
     }
-    if (ChangeBM) {
+
+    /* If we are in a fill stroke situation, do not change the blend mode.
+       We can have situations where the fill and the stroke have different
+       blending needs (one may need compatible overprint and the other may
+       need the normal mode) This is all handled in the fill stroke logic */
+    if (ChangeBM && caller != TRANSPARENCY_Caller_FillStroke) {
         state->saveBM = mode;
         state->ChangeBM = true;
         code = gs_setblendmode(ctx->pgs, BLEND_MODE_CompatibleOverprint);
@@ -734,12 +798,33 @@ int pdfi_trans_setup(pdf_context *ctx, pdfi_trans_state_t *state, gs_rect *bbox,
     return code;
 }
 
+int pdfi_trans_required(pdf_context *ctx)
+{
+    gs_blend_mode_t mode;
+
+    if (!ctx->page.has_transparency)
+        return 0;
+
+    mode = gs_currentblendmode(ctx->pgs);
+    if ((mode == BLEND_MODE_Normal || mode == BLEND_MODE_Compatible) &&
+        ctx->pgs->fillconstantalpha == 1 &&
+        ctx->pgs->strokeconstantalpha == 1 &&
+        ((pdfi_int_gstate *)ctx->pgs->client_data)->SMask == NULL)
+        return 0;
+
+    return 1;
+}
+
 int pdfi_trans_setup_text(pdf_context *ctx, pdfi_trans_state_t *state, bool is_show)
 {
-    int Trmode = gs_currenttextrenderingmode(ctx->pgs);
+    int Trmode;
     int code, code1;
     gs_rect bbox;
 
+    if (!pdfi_trans_required(ctx))
+        return 0;
+
+    Trmode = gs_currenttextrenderingmode(ctx->pgs);
     code = gs_gsave(ctx->pgs);
     if (code < 0) goto exit;
 
@@ -775,11 +860,10 @@ int pdfi_trans_setup_text(pdf_context *ctx, pdfi_trans_state_t *state, bool is_s
 
 int pdfi_trans_teardown_text(pdf_context *ctx, pdfi_trans_state_t *state)
 {
-    int code = 0;
+    if (!pdfi_trans_required(ctx))
+         return 0;
 
-    code = pdfi_trans_teardown(ctx, state);
-
-    return code;
+    return pdfi_trans_teardown(ctx, state);
 }
 
 int pdfi_trans_teardown(pdf_context *ctx, pdfi_trans_state_t *state)
@@ -803,6 +887,7 @@ int pdfi_trans_teardown(pdf_context *ctx, pdfi_trans_state_t *state)
 
 int pdfi_trans_set_params(pdf_context *ctx)
 {
+    int code = 0;
     pdfi_int_gstate *igs = (pdfi_int_gstate *)ctx->pgs->client_data;
     gs_transparency_channel_selector_t csel;
 
@@ -812,9 +897,9 @@ int pdfi_trans_set_params(pdf_context *ctx)
         else
             csel = TRANSPARENCY_CHANNEL_Opacity;
         if (igs->SMask) {
-            pdfi_trans_set_mask(ctx, igs, csel);
+            code = pdfi_trans_set_mask(ctx, igs, csel);
         }
     }
 
-    return 0;
+    return code;
 }

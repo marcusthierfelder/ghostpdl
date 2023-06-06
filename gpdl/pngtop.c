@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* pngtop.c */
@@ -293,7 +293,7 @@ bytes_until_uel(const stream_cursor_read *pr)
             p++;
         if (p == q)
             break;
-        avail = pr->limit - pr->ptr;
+        avail = q - p;
         if (memcmp(p, "\033%-12345X", min(avail, 9)) == 0) {
             /* At least a partial match to a UEL. Everything up to
              * the start of the match is up for grabs. */
@@ -590,6 +590,13 @@ do_impl_process(png_interp_instance_t *png, stream_cursor_read * pr, bool eof)
                 break;
             }
 
+            if (SIZE_MAX / png->byte_width < (png->interlaced ? png->height : 1))
+            {
+                code = gs_note_error(gs_error_VMerror);
+                png->state = ii_state_flush;
+                break;
+            }
+
             png->samples = gs_alloc_bytes(png->memory,
                                           (size_t)png->byte_width * (png->interlaced ? png->height : 1),
                                           "png_impl_process(samples)");
@@ -678,11 +685,20 @@ do_impl_process(png_interp_instance_t *png, stream_cursor_read * pr, bool eof)
         }
         default:
         case ii_state_flush:
+            if (png->png)
+            {
+                png_destroy_read_struct(&png->png, &png->png_info, NULL);
+                png->png = NULL;
+                png->png_info = NULL;
+            }
+
             if (png->penum) {
                 (void)gs_image_cleanup_and_free_enum(png->penum, png->pgs);
                 png->penum = NULL;
             }
 
+            gs_free_object(png->memory, png->buffer, "png_impl_process(buffer)");
+            png->buffer = NULL;
             gs_free_object(png->memory, png->samples, "png_impl_process(samples)");
             png->samples = NULL;
             /* We want to bin any data we get up to, but not including

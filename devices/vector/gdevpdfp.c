@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -129,6 +129,11 @@ static const gs_param_item_t pdf_param_items[] = {
     pi("NoOutputFonts", gs_param_type_bool, FlattenFonts),
     pi("WantsPageLabels", gs_param_type_bool, WantsPageLabels),
     pi("UserUnit", gs_param_type_float, UserUnit),
+    pi("OmitInfoDate", gs_param_type_bool, OmitInfoDate),
+    pi("OmitID", gs_param_type_bool, OmitID),
+    pi("OmitXMP", gs_param_type_bool, OmitXMP),
+    pi("ModifiesPageSize", gs_param_type_bool, ModifiesPageSize),
+    pi("ModifiesPageOrder", gs_param_type_bool, ModifiesPageOrder),
 #undef pi
     gs_param_item_end
 };
@@ -296,6 +301,13 @@ gdev_pdf_get_param(gx_device *dev, char *Param, void *list)
         return param_write_string(plist, "UseOCR", &ocrstr);
     }
 #endif
+
+    if (strcmp(Param, "OmitInfoDate") == 0)
+        return(param_write_bool(plist, "OmitInfoDate", &pdev->OmitInfoDate));
+    if (strcmp(Param, "OmitXMP") == 0)
+        return(param_write_bool(plist, "OmitXMP", &pdev->OmitXMP));
+    if (strcmp(Param, "OmitID") == 0)
+        return(param_write_bool(plist, "OmitID", &pdev->OmitID));
 
     return gdev_psdf_get_param(dev, Param, list);
 }
@@ -647,6 +659,25 @@ gdev_pdf_put_params_impl(gx_device * dev, const gx_device_pdf * save_dev, gs_par
 
     if (pdev->is_ps2write && (code = param_read_bool(plist, "ProduceDSC", &pdev->ProduceDSC)) < 0) {
         param_signal_error(plist, param_name, code);
+    }
+
+    if (pdev->OmitInfoDate && pdev->PDFX != 0) {
+        emprintf(pdev->memory, "\nIt is not possible to omit the CreationDate when creating PDF/X\nOmitInfoDate is being ignored.\n");
+        pdev->OmitInfoDate = 0;
+    }
+
+    if (pdev->OmitID && pdev->CompatibilityLevel > 1.7) {
+        emprintf(pdev->memory, "\nIt is not possible to omit the ID array when creating a version 2.0 or greater PDF\nOmitID is being ignored.\n");
+        pdev->OmitID = 0;
+    }
+    if (pdev->OmitID && pdev->OwnerPassword.size != 0) {
+        emprintf(pdev->memory, "\nIt is not possible to omit the ID array when creating an encrypted PDF\nOmitID is being ignored.\n");
+        pdev->OmitID = 0;
+    }
+
+    if (pdev->OmitXMP && pdev->PDFA != 0) {
+        emprintf(pdev->memory, "\nIt is not possible to omit the XMP metadta when creating a PDF/A\nOmitXMP is being ignored.\n");
+        pdev->OmitXMP = 0;
     }
 
     /* PDFA and PDFX are stored in the page device dictionary and therefore

@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -87,7 +87,8 @@
 #include <zlib.h>
 
 int gs_log_error(int err, const char *file, int line);
-
+/* Prototype to placate compiler */
+int spgetcc(stream *s, bool b);
 /*
  * The rom file system is an array of pointers to nodes, terminated by a NULL
  */
@@ -145,6 +146,19 @@ static inline int isbigendian(void)
     } u = {1};
 
     return u.c[0] != 1;
+}
+
+/* The gp_local_arg_encoding_get_codepoint() function presnet in (some) OS-specific
+ * files (gp_unix.c, gp_win32.c) now uses streams, so it won't compile unless there
+ * is an implementation of spgetcc(). We don't actually use the function for mkromfs
+ * so we just need to make sure it compiles.
+ */
+int spgetcc(stream *s, bool b)
+{
+    (void) s; /* avoid 'unused' warning from compilers */
+    (void) b;
+
+    return 0;
 }
 
 /* mkromfs doesn't use gp_stat, but it does link gp_misc.c which includes
@@ -2690,6 +2704,11 @@ main(int argc, char *argv[])
         Xlist_head = Xlist_scan;
     }
     printf("Total %%rom%% structure size is %d bytes.\n", totlen);
-
+    if (splits.outname != NULL)
+       free(splits.outname);
+    if (splits.outname_formatted != NULL)
+        free(splits.outname_formatted);
+    if (splits.sizes != NULL)
+        free(splits.sizes);
     return 0;
 }

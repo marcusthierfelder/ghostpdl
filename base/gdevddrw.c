@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Default polygon and image drawing device procedures */
@@ -422,11 +422,41 @@ gx_default_fill_trapezoid(gx_device * dev, const gs_fixed_edge * left,
     bool fill_direct = color_writes_pure(pdevc, lop);
 
     if (swap_axes) {
+        if (dev->width != 0 && dev->non_strict_bounds == 0)
+        {
+            /* Some devices init max->width to be int_max, which overflows when converted to fixed. */
+            int dw = dev->width > max_int_in_fixed ? max_int_in_fixed : dev->width;
+            if (ytop < 0)
+                return 0;
+            if (ybot < 0)
+                ybot = 0;
+            dw = int2fixed(dw);
+            if (ybot > dw)
+                return 0;
+            if (ytop > dw)
+                ytop = dw;
+        }
+
         if (fill_direct)
             return gx_fill_trapezoid_as_fd(dev, left, right, ybot, ytop, 0, pdevc, lop);
         else
             return gx_fill_trapezoid_as_nd(dev, left, right, ybot, ytop, 0, pdevc, lop);
     } else {
+        if (dev->height != 0 && dev->non_strict_bounds == 0)
+        {
+            /* Some devices init max->height to be int_max, which overflows when converted to fixed. */
+            int dh = dev->height > max_int_in_fixed ? max_int_in_fixed : dev->height;
+            if (ytop < 0)
+                return 0;
+            if (ybot < 0)
+                ybot = 0;
+            dh = int2fixed(dh);
+            if (ybot > dh)
+                return 0;
+            if (ytop > dh)
+                ytop = dh;
+        }
+
         if (fill_direct)
             return gx_fill_trapezoid_ns_fd(dev, left, right, ybot, ytop, 0, pdevc, lop);
         else

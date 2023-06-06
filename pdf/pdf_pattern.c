@@ -1,4 +1,4 @@
-/* Copyright (C) 2019-2021 Artifex Software, Inc.
+/* Copyright (C) 2019-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* Pattern operations for the PDF interpreter */
@@ -21,6 +21,7 @@
 #include "pdf_pattern.h"
 #include "pdf_stack.h"
 #include "pdf_array.h"
+#include "pdf_font_types.h"
 #include "pdf_gstate.h"
 #include "pdf_file.h"
 #include "pdf_dict.h"
@@ -113,36 +114,12 @@ static void pdfi_free_pattern_context(pdf_pattern_context_t *context)
     gs_free_object(context->ctx->memory, context, "Free pattern context");
 }
 
-static bool
-pdfi_pattern_purge_proc(gx_color_tile * ctile, void *proc_data)
-{
-    gs_id id = (gs_id)proc_data;
-    if (ctile->id == id)
-        return true;
-    return false;
-}
-
 void pdfi_pattern_cleanup(gs_memory_t * mem, void *p)
 {
     gs_pattern1_instance_t *pinst = (gs_pattern1_instance_t *)p;
-    pdf_pattern_context_t *context;
-    gx_color_tile *pctile = NULL;
 
-    context = (pdf_pattern_context_t *)pinst->client_data;
-
-    /* If are being called from Ghostscript, the clist pattern accumulator device (in
-       the tile cache) *can* outlast outlast our pattern instance, so if the pattern
-       instance is being freed, also remove the entry from the cache
-     */
-    if (context != NULL && context->ctx != NULL && context->ctx->pgs != NULL &&
-        context->shading == NULL &&  context->ctx->pgs->pattern_cache != NULL
-     && gx_pattern_cache_get_entry(context->ctx->pgs, pinst->id, &pctile) == 0
-     && gx_pattern_tile_is_clist(pctile)) {
-        gx_pattern_cache_winnow(gstate_pattern_cache(context->ctx->pgs), pdfi_pattern_purge_proc, (void *)(pctile->id));
-    }
-
-    if (context != NULL) {
-        pdfi_free_pattern_context(context);
+    if (pinst->client_data != NULL) {
+        pdfi_free_pattern_context((pdf_pattern_context_t *)pinst->client_data);
         pinst->client_data = NULL;
         pinst->notify_free = NULL;
     }
@@ -313,6 +290,14 @@ pdfi_pattern_paintproc(const gs_client_color *pcc, gs_gstate *pgs)
 {
     const gs_client_pattern *pinst = gs_getpattern(pcc);
     int code = 0;
+    pdf_context *ctx = ((pdf_pattern_context_t *)((gs_pattern1_instance_t *)pcc->pattern)->client_data)->ctx;
+    text_state_t ts;
+
+    /* We want to start running the pattern PaintProc with a "clean slate"
+       so store, clear......."
+     */
+    memcpy(&ts, &ctx->text, sizeof(ctx->text));
+    memset(&ctx->text, 0x00, sizeof(ctx->text));
 
     /* pgs->device is the newly created pattern accumulator, but we want to test the device
      * that is 'behind' that, the actual output device, so we use the one from
@@ -324,10 +309,14 @@ pdfi_pattern_paintproc(const gs_client_color *pcc, gs_gstate *pgs)
     }
 
     if (code == 1) {
-        return pdfi_pattern_paint_high_level(pcc, pgs);
+        code = pdfi_pattern_paint_high_level(pcc, pgs);
     } else {
-        return pdfi_pattern_paint(pcc, pgs);
+        code =  pdfi_pattern_paint(pcc, pgs);
     }
+
+    /* .... and restore the text state in the context */
+    memcpy(&ctx->text, &ts, sizeof(ctx->text));
+    return code;
 }
 
 
@@ -418,7 +407,7 @@ pdfi_setpattern_type1(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_di
     gs_pattern1_init(&templat);
 
     /* Must be a stream */
-    if (stream->type != PDF_STREAM) {
+    if (pdfi_type_of(stream) != PDF_STREAM) {
         code = gs_note_error(gs_error_typecheck);
         goto exit;
     }
@@ -446,16 +435,33 @@ pdfi_setpattern_type1(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_di
     if (code < 0)
         goto exit;
 
+    /* XStep and YStep must be non-zero; table 425; page 293 of the 1.7 Reference */
+    if (XStep == 0.0 || YStep == 0.0) {
+        code = gs_note_error(gs_error_rangecheck);
+        goto exit;
+    }
+
+    /* The pattern instance holds the pattern step as floats, make sure they
+     * will fit.
+     */
+    if (XStep < -MAX_FLOAT || XStep > MAX_FLOAT || YStep < -MAX_FLOAT || YStep > MAX_FLOAT) {
+        code = gs_note_error(gs_error_rangecheck);
+        goto exit;
+    }
+
     /* The spec says Resources are required, but in fact this doesn't seem to be true.
      * (tests_private/pdf/sumatra/infinite_pattern_recursion.pdf)
      */
     code = pdfi_dict_get_type(ctx, pdict, "Resources", PDF_DICT, (pdf_obj **)&Resources);
     if (code < 0) {
+        if (code == gs_error_undefined && !ctx->args.pdfstoponwarning) {
 #if DEBUG_PATTERN
         dbgmprintf(ctx->memory, "PATTERN: Missing Resources in Pattern dict\n");
 #endif
-        pdfi_set_warning(ctx, 0, NULL, W_PDF_BADPATTERN, "pdfi_setpattern_type1", NULL);
-        code = 0;
+            pdfi_set_warning(ctx, code, NULL, W_PDF_BADPATTERN, "pdfi_setpattern_type1", "Pattern has no Resources dictionary");
+            code = 0;
+        } else
+            goto exit;
     }
 
     /* (optional Matrix) */
@@ -475,11 +481,15 @@ pdfi_setpattern_type1(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_di
         goto exit;
     }
 
-    /* See if pattern uses transparency */
-    if (ctx->page.has_transparency) {
-        code = pdfi_check_Pattern_transparency(ctx, pdict, page_dict, &transparency);
-        if (code < 0)
-            goto exit;
+    /* See if pattern uses transparency, or if we are in an overprint
+       simulation situation */
+    if (ctx->page.simulate_op)
+        transparency = true;
+    else
+        if (ctx->page.has_transparency) {
+            code = pdfi_check_Pattern_transparency(ctx, pdict, page_dict, &transparency);
+            if (code < 0)
+                goto exit;
     }
 
     /* TODO: Resources?  Maybe I should check that they are all valid before proceeding, or something? */
@@ -513,13 +523,35 @@ pdfi_setpattern_type1(pdf_context *ctx, pdf_dict *stream_dict, pdf_dict *page_di
 
     cc->pattern->client_data = context;
     cc->pattern->notify_free = pdfi_pattern_cleanup;
+    {
+        unsigned long hash = 5381;
+        unsigned int i;
+        const char *str = (const char *)&ctx->pgs->ctm;
+
+        gs_pattern1_instance_t *pinst = (gs_pattern1_instance_t *)cc->pattern;
+
+
+        for (i = 0; i < 4 * sizeof(float); i++)
+            hash = ((hash << 5) + hash) + str[i]; /* hash * 33 + c */
+
+        str = (const char *)&pdict->object_num;
+        for (i = 0; i < sizeof(uint32_t); i++)
+            hash = ((hash << 5) + hash) + str[i]; /* hash * 33 + c */
+
+        hash = ((hash << 5) + hash) + ctx->pgs->device->color_info.num_components; /* hash * 33 + c */
+
+        /* Include num_components for case where we have softmask and non-softmask
+           fills with the same tile. We may need two tiles for this if there is a
+           change in color space for the transparency group. */
+        pinst->id = hash;
+    }
     context = NULL;
 
     code = pdfi_grestore(ctx);
     if (code < 0)
         goto exit;
  exit:
-    pdfi_countdown(context);
+    gs_free_object(ctx->memory, context, "pdfi_setpattern_type1(context)");
     pdfi_countdown(Resources);
     pdfi_countdown(Matrix);
     pdfi_countdown(BBox);

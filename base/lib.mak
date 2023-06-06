@@ -1,4 +1,4 @@
-# Copyright (C) 2001-2021 Artifex Software, Inc.
+# Copyright (C) 2001-2023 Artifex Software, Inc.
 # All Rights Reserved.
 #
 # This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
 # of the license contained in the file LICENSE in this distribution.
 #
 # Refer to licensing information at http://www.artifex.com or contact
-# Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-# CA 94945, U.S.A., +1(415)492-9861, for further information.
+# Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+# CA 94129, USA, for further information.
 #
 # (Platform-independent) makefile for Ghostscript graphics library
 # and other support code.
@@ -196,6 +196,7 @@ gxsync_h=$(GLSRC)gxsync.h
 gxclthrd_h=$(GLSRC)gxclthrd.h
 gxdevsop_h=$(GLSRC)gxdevsop.h
 gdevflp_h=$(GLSRC)gdevflp.h
+pagelist_h=$(GLSRC)pagelist.h
 gdevkrnlsclass_h=$(GLSRC)gdevkrnlsclass.h
 gdevsclass_h=$(GLSRC)gdevsclass.h
 
@@ -648,6 +649,8 @@ gdevoflt_h=$(GLSRC)gdevoflt.h
 
 gdevnup_h=$(GLSRC)gdevnup.h
 
+gp_utf8_h=$(GLSRC)gp_utf8.h
+
 png__h=$(GLSRC)png_.h $(MAKEFILE)
 x__h=$(GLSRC)x_.h
 
@@ -989,7 +992,7 @@ $(GLOBJ)gsdevmem.$(OBJ) : $(GLSRC)gsdevmem.c $(AK) $(gx_h)\
 $(GLOBJ)gsdparam.$(OBJ) : $(GLSRC)gsdparam.c $(AK) $(gx_h)\
  $(gserrors_h) $(memory__h) $(string__h)\
  $(gsdevice_h) $(gsparam_h) $(gsparamx_h) $(gxdevice_h) $(gxfixed_h)\
- $(gsicc_manage_h) $(LIB_MAK) $(MAKEDIRS)
+ $(gsicc_manage_h) $(gdevnup_h) $(gp_utf8_h) $(LIB_MAK) $(MAKEDIRS)
 	$(GLCC) $(GLO_)gsdparam.$(OBJ) $(C_) $(GLSRC)gsdparam.c
 
 $(GLOBJ)gsfname.$(OBJ) : $(GLSRC)gsfname.c $(AK) $(memory__h)\
@@ -1404,22 +1407,26 @@ downscale_=$(GLOBJ)gxdownscale.$(OBJ) $(claptrap) $(ets)
 
 $(GLOBJ)gxdownscale_0.$(OBJ) : $(GLSRC)gxdownscale.c $(AK) $(string__h)\
  $(gxdownscale_h) $(gserrors_h) $(gdevprn_h) $(assert__h) $(ets_h)\
- $(LIB_MAK) $(MAKEDIRS)
+ $(gsicc_cache_h) $(LIB_MAK) $(MAKEDIRS)
 	$(GLCC) $(GLO_)gxdownscale_0.$(OBJ) $(C_) $(GLSRC)gxdownscale.c
 
 $(GLOBJ)gxdownscale_1.$(OBJ) : $(GLSRC)gxdownscale.c $(AK) $(string__h)\
  $(gxdownscale_h) $(gserrors_h) $(gdevprn_h) $(assert__h) $(ets_h)\
- $(LIB_MAK) $(MAKEDIRS)
+ $(gsicc_cache_h) $(LIB_MAK) $(MAKEDIRS)
 	$(GLCC) $(D_)WITH_CAL$(_D) $(I_)$(CALSRCDIR)$(_I) $(GLO_)gxdownscale_1.$(OBJ) $(C_) $(GLSRC)gxdownscale.c
 
 $(GLOBJ)gxdownscale.$(OBJ) : $(GLOBJ)gxdownscale_$(WITH_CAL).$(OBJ) $(AK) $(gp_h)
 	$(CP_) $(GLOBJ)gxdownscale_$(WITH_CAL).$(OBJ) $(GLOBJ)gxdownscale.$(OBJ)
 
+# ---- Various subclass devices ----
+subclass_=$(GLOBJ)gdevflp.$(OBJ) $(GLOBJ)gdevkrnlsclass.$(OBJ) $(GLOBJ)gdevepo.$(OBJ) \
+ $(GLOBJ)gdevoflt.$(OBJ) $(GLOBJ)gdevnup.$(OBJ) $(GLOBJ)gdevsclass.$(OBJ)
+
 ###### Create a pseudo-"feature" for the entire graphics library.
 
-LIB0s=$(GLOBJ)gpmisc.$(OBJ) $(GLOBJ)stream.$(OBJ) $(GLOBJ)strmio.$(OBJ)
-LIB1s=$(GLOBJ)gsalloc.$(OBJ) $(GLOBJ)gxdownscale.$(OBJ) $(downscale_) $(GLOBJ)gdevprn.$(OBJ) $(GLOBJ)gdevflp.$(OBJ) $(GLOBJ)gdevkrnlsclass.$(OBJ) $(GLOBJ)gdevepo.$(OBJ)
-LIB2s=$(GLOBJ)gdevmplt.$(OBJ) $(GLOBJ)gsbitcom.$(OBJ) $(GLOBJ)gsbitops.$(OBJ) $(GLOBJ)gsbittab.$(OBJ) $(GLOBJ)gdevoflt.$(OBJ) $(GLOBJ)gdevnup.$(OBJ) $(GLOBJ)gdevsclass.$(OBJ)
+LIB0s=$(GLOBJ)gpmisc.$(OBJ) $(GLOBJ)stream.$(OBJ) $(GLOBJ)strmio.$(OBJ) $(GLOBJ)pagelist.$(OBJ)
+LIB1s=$(GLOBJ)gsalloc.$(OBJ) $(GLOBJ)gxdownscale.$(OBJ) $(downscale_) $(GLOBJ)gdevprn.$(OBJ) $(subclass_)
+LIB2s=$(GLOBJ)gdevmplt.$(OBJ) $(GLOBJ)gsbitcom.$(OBJ) $(GLOBJ)gsbitops.$(OBJ) $(GLOBJ)gsbittab.$(OBJ)
 # Note: gschar.c is no longer required for a standard build;
 # we include it only for backward compatibility for library clients.
 LIB3s=$(GLOBJ)gscedata.$(OBJ) $(GLOBJ)gscencs.$(OBJ) $(GLOBJ)gschar.$(OBJ) $(GLOBJ)gscolor.$(OBJ)
@@ -2072,11 +2079,14 @@ $(GLOBJ)gdevmplt.$(OBJ) : $(GLSRC)gdevmplt.c $(gdevmplt_h) $(gdevp14_h)\
  $(memory__h)
 	$(GLCC) $(GLO_)gdevmplt.$(OBJ) $(C_) $(GLSRC)gdevmplt.c
 
+$(GLOBJ)pagelist.$(OBJ) : $(GLSRC)pagelist.c $(pagelist_h) $(gserrors_h) $(memory__h)
+	$(GLCC) $(GLO_)pagelist.$(OBJ) $(C_) $(GLSRC)pagelist.c
+
 $(GLOBJ)gdevflp.$(OBJ) : $(GLSRC)gdevflp.c $(gdevflp_h) $(gdevp14_h) \
  $(gdevprn_h) $(gdevsclass_h) $(gsdevice_h) $(gserrors_h) $(gsparam_h)\
  $(gsstype_h) $(gx_h) $(gxcmap_h) $(gxcpath_h) $(gxdcolor_h) $(gxdevice_h) \
  $(gxgstate_h) $(gximage_h) $(gxiparam_h) $(gxpaint_h) $(gxpath_h) $(math__h)\
- $(memory__h)
+ $(string__h) $(memory__h)
 	$(GLCC) $(GLO_)gdevflp.$(OBJ) $(C_) $(GLSRC)gdevflp.c
 
 $(GLOBJ)gdevepo.$(OBJ) : $(GLSRC)gdevepo.c $(gdevepo_h) $(gdevp14_h) \
@@ -2650,7 +2660,8 @@ $(GLOBJ)gxpcmap.$(OBJ) : $(GLSRC)gxpcmap.c $(AK) $(gx_h) $(gserrors_h)\
  $(gsstruct_h) $(gsutil_h) $(gp_h) $(gxcoord_h) $(gxgetbit_h)\
  $(gxcolor2_h) $(gxcspace_h) $(gxdcolor_h) $(gxdevice_h) $(gxdevmem_h)\
  $(gxfixed_h) $(gxmatrix_h) $(gxpcolor_h) $(gxclist_h) $(gxcldev_h)\
- $(gzstate_h) $(gdevp14_h) $(gdevmpla_h) $(LIB_MAK) $(MAKEDIRS)
+ $(gzstate_h) $(gdevp14_h) $(gdevmpla_h) $(gsicc_blacktext_h)\
+ $(gscspace_h) $(LIB_MAK) $(MAKEDIRS)
 	$(GLCC) $(GLO_)gxpcmap.$(OBJ) $(C_) $(GLSRC)gxpcmap.c
 
 # ---------------- PostScript Type 1 (and Type 4) fonts ---------------- #
@@ -3000,7 +3011,7 @@ $(GLOBJ)gsicc_profilecache.$(OBJ) : $(GLSRC)gsicc_profilecache.c $(AK)\
 
 $(GLOBJ)gsicc_blacktext.$(OBJ) : $(GLSRC)gsicc_blacktext.c $(AK)\
  $(gsmemory_h) $(gsstruct_h) $(gzstate_h) $(gsicc_blacktext_h)\
- $(LIB_MAK) $(MAKEDIRS)
+ $(gsicc_cache_h) $(LIB_MAK) $(MAKEDIRS)
 	$(GLCC) $(GLO_)gsicc_blacktext.$(OBJ) $(C_) $(GLSRC)gsicc_blacktext.c
 
 $(GLOBJ)gsicc_lcms2mt_1_0.$(OBJ) : $(GLSRC)gsicc_lcms2mt.c\
@@ -3653,6 +3664,13 @@ $(GLOBJ)gsiodisk.$(OBJ) : $(GLSRC)gsiodisk.c $(AK) $(gx_h)\
 # Platform-specific code doesn't really belong here: this is code that is
 # shared among multiple platforms.
 
+# UTF8 conversion functions
+$(GLOBJ)gp_utf8.$(OBJ): $(GLSRC)gp_utf8.c $(gp_utf8_h) $(LIB_MAK) $(MAKEDIRS)
+	$(GLCC) $(GLO_)gp_utf8.$(OBJ) $(C_) $(GLSRC)gp_utf8.c
+
+$(AUX)gp_utf8.$(OBJ): $(GLSRC)gp_utf8.c $(gp_utf8_h) $(LIB_MAK) $(MAKEDIRS)
+	$(GLCCAUX) $(AUXO_)gp_utf8.$(OBJ) $(C_) $(GLSRC)gp_utf8.c
+
 # Standard implementation of gp_getenv.
 $(GLOBJ)gp_getnv.$(OBJ) : $(GLSRC)gp_getnv.c $(AK) $(stdio__h)\
  $(string__h) $(gp_h) $(gsmemory_h) $(gstypes_h) $(LIB_MAK) $(MAKEDIRS)
@@ -4069,6 +4087,7 @@ $(GLSRC)gsalloc.h:$(GLGEN)arch.h
 $(GLSRC)gsargs.h:$(GLSRC)std.h
 $(GLSRC)gsargs.h:$(GLSRC)stdpre.h
 $(GLSRC)gsargs.h:$(GLGEN)arch.h
+$(GLSRC)gsargs.h:$(GLSRC)stream.h
 $(GLSRC)gsexit.h:$(GLSRC)std.h
 $(GLSRC)gsexit.h:$(GLSRC)stdpre.h
 $(GLSRC)gsexit.h:$(GLGEN)arch.h
@@ -4267,6 +4286,7 @@ $(GLSRC)gxclthrd.h:$(GLSRC)stdpre.h
 $(GLSRC)gxclthrd.h:$(GLGEN)arch.h
 $(GLSRC)gxclthrd.h:$(GLSRC)gs_dll_call.h
 $(GLSRC)gxdevsop.h:$(GLSRC)gxdevcli.h
+$(GLSRC)gxdevsop.h:$(GLSRC)gsovrc.h
 $(GLSRC)gxdevsop.h:$(GLSRC)gxcmap.h
 $(GLSRC)gxdevsop.h:$(GLSRC)gxtext.h
 $(GLSRC)gxdevsop.h:$(GLSRC)gstext.h

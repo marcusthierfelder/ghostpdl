@@ -1,4 +1,4 @@
-/* Copyright (C) 2001-2021 Artifex Software, Inc.
+/* Copyright (C) 2001-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 
@@ -294,6 +294,12 @@ buffer_segment_index(const stream_band_read_state *ss, uint buffer_offset, uint 
             return i;
         }
     }
+    /* Now cope with the case where we've read exactly to the end of the buffer.
+    * There might be more data still to come. */
+    if (buffer_offset == offset) {
+      *poffset0 = offset0;
+      return i-1;
+    }
 #ifdef EXTRA_OFFSET_MAP_DEBUGGING
     dmlprintf1(ss->local_memory, "buffer_segment_index fail: buffer_offset=%d not found\n", buffer_offset);
     exit(1);
@@ -363,6 +369,24 @@ top_up_offset_map(stream_state * st, const byte *buf, const byte *ptr, const byt
                 (ss->offset_map_length - i) * sizeof(*ss->offset_map));
         ss->offset_map_length -= i;
     }
+}
+
+/* This function is called when data is copied from the stream out into a separate
+ * buffer without going through the usual clist buffers. Essentially data for the
+ * id we are reading at buffer_offset within the buffer is skipped. */
+void adjust_offset_map_for_skipped_data(stream_state *st, uint buffer_offset, uint skipped)
+{
+    uint offset0;
+    stream_band_read_state *const ss = (stream_band_read_state *) st;
+    int i;
+
+    if (!gs_debug_c('L'))
+        return;
+
+    i = buffer_segment_index(ss, buffer_offset, &offset0);
+
+    ss->offset_map[i].buffered -= skipped;
+    ss->offset_map[i].file_offset += skipped;
 }
 
 void
@@ -930,12 +954,13 @@ clist_render_rectangle(gx_device_clist *cldev, const gs_int_rect *prect,
 
             /* Store the page information. */
             page_info.cfile = page_info.bfile = NULL;
-            strncpy(page_info.cfname, ppage->page->cfname, sizeof(page_info.cfname)-1);
-            strncpy(page_info.bfname, ppage->page->bfname, sizeof(page_info.bfname)-1);
+            memcpy(page_info.cfname, ppage->page->cfname, sizeof(page_info.cfname));
+            memcpy(page_info.bfname, ppage->page->bfname, sizeof(page_info.bfname));
             page_info.io_procs = ppage->page->io_procs;
             page_info.tile_cache_size = ppage->page->tile_cache_size;
             page_info.bfile_end_pos = ppage->page->bfile_end_pos;
             page_info.band_params = ppage->page->band_params;
+            page_info.line_ptrs_offset = 0;
             pinfo = &page_info;
 
             /*

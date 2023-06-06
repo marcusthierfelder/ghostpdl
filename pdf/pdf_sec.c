@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2021 Artifex Software, Inc.
+/* Copyright (C) 2020-2023 Artifex Software, Inc.
    All Rights Reserved.
 
    This software is provided AS-IS with no warranty, either express or
@@ -9,8 +9,8 @@
    of the license contained in the file LICENSE in this distribution.
 
    Refer to licensing information at http://www.artifex.com or contact
-   Artifex Software, Inc.,  1305 Grant Avenue - Suite 200, Novato,
-   CA 94945, U.S.A., +1(415)492-9861, for further information.
+   Artifex Software, Inc.,  39 Mesa Street, Suite 108A, San Francisco,
+   CA 94129, USA, for further information.
 */
 
 /* PDF decryption routines */
@@ -928,6 +928,9 @@ int pdfi_decrypt_string(pdf_context *ctx, pdf_string *string)
     pdf_string *EKey = NULL;
     char *Buffer = NULL;
 
+    if (ctx->encryption.StrF == CRYPT_IDENTITY)
+        return 0;
+
     if (!is_compressed_object(ctx, string->indirect_num, string->indirect_gen)) {
         Buffer = (char *)gs_alloc_bytes(ctx->memory, string->length, "pdfi_decrypt_string");
         if (Buffer == NULL)
@@ -990,6 +993,7 @@ static int pdfi_read_Encrypt_dict(pdf_context *ctx, int *KeyLen)
     pdf_dict *CF_dict = NULL, *StdCF_dict = NULL;
     pdf_dict *d = NULL, *d1 = NULL;
     pdf_obj *o = NULL;
+    bool b;
     pdf_string *s = NULL;
     int64_t i64;
     double f;
@@ -1036,30 +1040,41 @@ static int pdfi_read_Encrypt_dict(pdf_context *ctx, int *KeyLen)
     pdfi_countdown(o);
     o = NULL;
 
-    code = pdfi_dict_knownget_number(ctx, d, "Length", &f);
-    if (code < 0)
-        goto done;
-
-    if (code > 0)
-        *KeyLen = (int)f;
-    else
-        *KeyLen = 0;
-
-    code = pdfi_dict_get_int(ctx, d, "V", &i64);
-    if (code < 0)
-        goto done;
-
-    if (i64 < 1 || i64 > 5) {
-        code = gs_error_rangecheck;
-        goto done;
-    }
-
-    ctx->encryption.V = (int)i64;
+    *KeyLen = 0;
+    ctx->encryption.V = -1;
 
     code = pdfi_dict_get_int(ctx, d, "R", &i64);
     if (code < 0)
         goto done;
     ctx->encryption.R = (int)i64;
+
+    /* V is required for PDF 2.0 but only strongly recommended for earlier versions */
+    code = pdfi_dict_known(ctx, d, "V", &b);
+    if (code < 0)
+        goto done;
+
+    if (b) {
+        code = pdfi_dict_get_int(ctx, d, "V", &i64);
+        if (code < 0)
+            goto done;
+
+        if (i64 < 1 || i64 > 5) {
+            code = gs_error_rangecheck;
+            goto done;
+        }
+
+        ctx->encryption.V = (int)i64;
+
+        if (ctx->encryption.V == 2 || ctx->encryption.V == 3) {
+            code = pdfi_dict_knownget_number(ctx, d, "Length", &f);
+            if (code < 0)
+                goto done;
+
+            if (code > 0)
+                *KeyLen = (int)f;
+        } else
+            *KeyLen = 40;
+    }
 
     code = pdfi_dict_get_int(ctx, d, "P", &i64);
     if (code < 0)
@@ -1106,12 +1121,12 @@ static int pdfi_read_Encrypt_dict(pdf_context *ctx, int *KeyLen)
     pdfi_countdown(s);
     s = NULL;
 
-    code = pdfi_dict_knownget_type(ctx, d, "EncryptMetadata", PDF_BOOL, &o);
+    code = pdfi_dict_knownget_bool(ctx, d, "EncryptMetadata", &b);
     if (code < 0)
         goto done;
     if (code > 0) {
-        ctx->encryption.EncryptMetadata = ((pdf_bool *)o)->value;
-        pdfi_countdown(o);
+        ctx->encryption.EncryptMetadata = b;
+        code = 0;
     }
     else
         ctx->encryption.EncryptMetadata = true;
@@ -1365,9 +1380,19 @@ int pdfi_initialise_Decryption(pdf_context *ctx)
     switch(ctx->encryption.R) {
         case 2:
             /* Set up the defaults if not already set */
+            /* R of 2 means V < 2 which is either algorithm 3.1 with a 40-bit key
+             * or an undocumented and unsupported algorithm.
+             */
+            if (ctx->encryption.V >= 0) {
+                if (ctx->encryption.V == 0) {
+                    code = gs_note_error(gs_error_undefined);
+                    goto done;
+                }
+            }
             /* Revision 2 is always 40-bit RC4 */
-            if (KeyLen == 0)
-                KeyLen = 40;
+            if (KeyLen != 0 && KeyLen != 40)
+                pdfi_set_error(ctx, 0, NULL, E_PDF_INVALID_DECRYPT_LEN, "pdfi_initialise_Decryption", NULL);
+            KeyLen = 40;
             if (ctx->encryption.StmF == CRYPT_NONE)
                 ctx->encryption.StmF = CRYPT_V1;
             if (ctx->encryption.StrF == CRYPT_NONE)
@@ -1376,9 +1401,20 @@ int pdfi_initialise_Decryption(pdf_context *ctx)
             break;
         case 3:
             /* Set up the defaults if not already set */
-            /* Revision 3 is always 128-bit RC4 */
-            if (KeyLen == 0)
-                KeyLen = 128;
+            if (ctx->encryption.V >= 0) {
+                if (ctx->encryption.V == 3) {
+                    code = gs_note_error(gs_error_undefined);
+                    goto done;
+                }
+            }
+            /* Revision 3 *may* be more than 40 bits of RC4 */
+            if (KeyLen != 0) {
+                if (KeyLen < 40 || KeyLen > 128 || KeyLen % 8 != 0) {
+                    pdfi_set_warning(ctx, 0, NULL, W_PDF_INVALID_DECRYPT_LEN, "pdfi_initialise_Decryption", NULL);
+                    KeyLen = 128;
+                }
+            } else
+                KeyLen = 40;
             if (ctx->encryption.StmF == CRYPT_NONE)
                 ctx->encryption.StmF = CRYPT_V2;
             if (ctx->encryption.StrF == CRYPT_NONE)
@@ -1386,16 +1422,20 @@ int pdfi_initialise_Decryption(pdf_context *ctx)
             code = check_password_preR5(ctx, ctx->encryption.Password, ctx->encryption.PasswordLen, KeyLen, 3);
             break;
         case 4:
-            /* Revision 4 is either AES or RC4, but its always 128-bits */
-            if (KeyLen == 0)
+            if (ctx->encryption.StrF != CRYPT_IDENTITY || ctx->encryption.StmF != CRYPT_IDENTITY) {
+                /* Revision 4 is either AES or RC4, but its always 128-bits */
+                if (KeyLen != 0)
+                    pdfi_set_warning(ctx, 0, NULL, W_PDF_INVALID_DECRYPT_LEN, "pdfi_initialise_Decryption", NULL);
                 KeyLen = 128;
-            /* We can't set the encryption filter, so we have to hope the PDF file did */
-            code = check_password_preR5(ctx, ctx->encryption.Password, ctx->encryption.PasswordLen, KeyLen, 4);
+                /* We can't set the encryption filter, so we have to hope the PDF file did */
+                code = check_password_preR5(ctx, ctx->encryption.Password, ctx->encryption.PasswordLen, KeyLen, 4);
+            }
             break;
         case 5:
             /* Set up the defaults if not already set */
-            if (KeyLen == 0)
-                KeyLen = 256;
+            if (KeyLen != 0)
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_INVALID_DECRYPT_LEN, "pdfi_initialise_Decryption", NULL);
+            KeyLen = 256;
             if (ctx->encryption.StmF == CRYPT_NONE)
                 ctx->encryption.StmF = CRYPT_AESV2;
             if (ctx->encryption.StrF == CRYPT_NONE)
@@ -1405,8 +1445,9 @@ int pdfi_initialise_Decryption(pdf_context *ctx)
         case 6:
             /* Set up the defaults if not already set */
             /* Revision 6 is always 256-bit AES */
-            if (KeyLen == 0)
-                KeyLen = 256;
+            if (KeyLen != 0)
+                pdfi_set_warning(ctx, 0, NULL, W_PDF_INVALID_DECRYPT_LEN, "pdfi_initialise_Decryption", NULL);
+            KeyLen = 256;
             if (ctx->encryption.StmF == CRYPT_NONE)
                 ctx->encryption.StmF = CRYPT_AESV3;
             if (ctx->encryption.StrF == CRYPT_NONE)
